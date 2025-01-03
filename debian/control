@@ -1,0 +1,12 @@
+Source: ros-rolling-mola-state-estimation
+Section: misc
+Priority: optional
+Maintainer: Jose-Luis Blanco-Claraco <jlblanco@ual.es>
+Build-Depends: debhelper (>= 9.0.0), ros-rolling-ament-cmake, ros-rolling-ament-cmake-xmllint <!nocheck>, ros-rolling-ament-lint-auto <!nocheck>, ros-rolling-ament-lint-cmake <!nocheck>, ros-rolling-mola-imu-preintegration, ros-rolling-mola-state-estimation-simple, ros-rolling-mola-state-estimation-smoother, ros-rolling-ros-workspace
+Homepage: 
+Standards-Version: 3.9.2
+
+Package: ros-rolling-mola-state-estimation
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ros-rolling-mola-imu-preintegration, ros-rolling-mola-state-estimation-simple, ros-rolling-mola-state-estimation-smoother, ros-rolling-ros-workspace
+Description: Metapackage with all state estimation packages MOLA packages.

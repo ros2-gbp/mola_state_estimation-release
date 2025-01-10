@@ -5,13 +5,13 @@
 -->
 <package format="3">
   <name>mola_state_estimation_simple</name>
-  <version>1.6.0</version>
+  <version>1.6.1</version>
   <description>SE(3) pose and twist path data fusion estimator</description>
 
   <maintainer email="joseluisblancoc@gmail.com">Jose-Luis Blanco-Claraco</maintainer>
   <license file="LICENSE">GPLv3</license>
 
-  <url type="website">https://github.com/MOLAorg/mola/tree/develop/mola_state_estimation_simple</url>
+  <url type="website">https://github.com/MOLAorg/mola_state_estimation</url>
 
 
   <depend>mola_common</depend>

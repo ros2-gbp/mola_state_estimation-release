@@ -1,7 +1,7 @@
 /* -------------------------------------------------------------------------
  *   A Modular Optimization framework for Localization and mApping  (MOLA)
  *
- * Copyright (C) 2018-2024 Jose Luis Blanco, University of Almeria
+ * Copyright (C) 2018-2025 Jose Luis Blanco, University of Almeria
  * Licensed under the GNU GPL v3 for non-commercial applications.
  *
  * This file is part of MOLA.
@@ -120,15 +120,14 @@ std::optional<
 }
 
 // -------- StateEstimationSmoother -------
-StateEstimationSmoother::StateEstimationSmoother()
-{
-    this->mrpt::system::COutputLogger::setLoggerName("StateEstimationSmoother");
-}
+StateEstimationSmoother::StateEstimationSmoother() = default;
 
 StateEstimationSmoother::~StateEstimationSmoother() = default;
 
 void StateEstimationSmoother::initialize(const mrpt::containers::yaml& cfg)
 {
+    this->mrpt::system::COutputLogger::setLoggerName("StateEstimationSmoother");
+
     MRPT_LOG_DEBUG_STREAM("initialize() called with:\n" << cfg << "\n");
     ENSURE_YAML_ENTRY_EXISTS(cfg, "params");
 

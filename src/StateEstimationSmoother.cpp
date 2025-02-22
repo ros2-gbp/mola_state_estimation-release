@@ -28,6 +28,7 @@
 #include <mola_state_estimation_smoother/StateEstimationSmoother.h>
 #include <mola_yaml/yaml_helpers.h>
 #include <mrpt/core/get_env.h>
+#include <mrpt/core/lock_helper.h>
 #include <mrpt/math/gtsam_wrappers.h>
 #include <mrpt/poses/Lie/SO.h>
 #include <mrpt/poses/gtsam_wrappers.h>
@@ -48,7 +49,7 @@
 
 // Custom factors:
 #include "FactorAngularVelocityIntegration.h"
-#include "FactorConstAngularVelocity.h"
+#include "FactorConstLocalVelocity.h"
 #include "FactorTrapezoidalIntegrator.h"
 
 // arguments: class_name, parent_class, class namespace
@@ -104,17 +105,18 @@ StateEstimationSmoother::frameid_t StateEstimationSmoother::State::frame_id(
 }
 
 std::optional<
-    std::pair<mrpt::Clock::time_point, StateEstimationSmoother::PoseData>>
+    std::pair<mrpt::Clock::time_point, StateEstimationSmoother::PointData>>
     StateEstimationSmoother::State::last_pose_of_frame_id(
         const std::string& frameId)
 {
     const auto frId = frame_id(frameId);
+
     for (auto it = data.rbegin(); it != data.rend(); ++it)
     {
         if (!it->second.pose) continue;
         const auto& p = *it->second.pose;
         if (p.frameId != frId) continue;
-        return std::make_pair(it->first, p);
+        return std::make_pair(it->first, it->second);
     }
     return {};
 }
@@ -139,11 +141,49 @@ void StateEstimationSmoother::initialize(const mrpt::containers::yaml& cfg)
 
 void StateEstimationSmoother::spinOnce()
 {
-    // nothing to do in this module
+    // At the predefined module rate, publish the current estimation,
+    // if we have any subscriber:
+    if (!anyUpdateLocalizationSubscriber()) return;
+
+    auto lck = mrpt::lockHelper(stateMutex_);
+
+    const auto tNowOpt = state_.get_current_extrapolated_stamp();
+    if (!tNowOpt)
+    {
+        MRPT_LOG_THROTTLE_WARN(
+            5.0, "Cannot publish vehicle pose (no input data yet?)");
+        return;
+    }
+
+    const auto nv = estimated_navstate(*tNowOpt, params.reference_frame_name);
+    if (!nv)
+    {
+        MRPT_LOG_THROTTLE_WARN(
+            5.0, "Cannot publish vehicle pose (stalled input data?)");
+        return;
+    }
+
+    LocalizationUpdate lu;
+    lu.child_frame     = params.vehicle_frame_name;
+    lu.reference_frame = params.reference_frame_name;
+
+    lu.method    = "state_estimator";
+    lu.quality   = 1;
+    lu.timestamp = *tNowOpt;
+    lu.pose      = nv->pose.getPoseMean().asTPose();
+    lu.cov       = nv->pose.cov_inv.inverse();
+
+    MRPT_LOG_DEBUG_FMT(
+        "Publishing timely pose estimate: t=%f pose=%s",
+        mrpt::Clock::toDouble(*tNowOpt), lu.pose.asString().c_str());
+
+    advertiseUpdatedLocalization(lu);
 }
 
 void StateEstimationSmoother::reset()
 {
+    auto lck = mrpt::lockHelper(stateMutex_);
+
     // reset:
     state_ = State();
 }
@@ -152,6 +192,10 @@ void StateEstimationSmoother::fuse_odometry(
     const mrpt::obs::CObservationOdometry& odom, const std::string& odomName)
 {
     using namespace std::string_literals;
+
+    auto lck = mrpt::lockHelper(stateMutex_);
+
+    state_.update_last_input_stamp(odom.timestamp);
 
     THROW_EXCEPTION("finish implementation!");
 
@@ -164,28 +208,49 @@ void StateEstimationSmoother::fuse_odometry(
     state_.data.insert({odom.timestamp, d});
 
     delete_too_old_entries();
+
+    MRPT_LOG_DEBUG_FMT(
+        "fuse_odometry: t=%f name=%s pose=%s",
+        mrpt::Clock::toDouble(odom.timestamp), odomName.c_str(),
+        odom.odometry.asString().c_str());
 }
 
 void StateEstimationSmoother::fuse_imu(const mrpt::obs::CObservationIMU& imu)
 {
+    auto lck = mrpt::lockHelper(stateMutex_);
+
+    state_.update_last_input_stamp(imu.timestamp);
+
     THROW_EXCEPTION("TODO");
     (void)imu;
 
     delete_too_old_entries();
+
+    MRPT_LOG_DEBUG_FMT("fuse_imu: t=%f", mrpt::Clock::toDouble(imu.timestamp));
 }
 
 void StateEstimationSmoother::fuse_gnss(const mrpt::obs::CObservationGPS& gps)
 {
+    auto lck = mrpt::lockHelper(stateMutex_);
+
+    state_.update_last_input_stamp(gps.timestamp);
+
     THROW_EXCEPTION("TODO");
     (void)gps;
 
     delete_too_old_entries();
+
+    MRPT_LOG_DEBUG_FMT("fuse_gnss: t=%f", mrpt::Clock::toDouble(gps.timestamp));
 }
 
 void StateEstimationSmoother::fuse_pose(
     const mrpt::Clock::time_point&         timestamp,
     const mrpt::poses::CPose3DPDFGaussian& pose, const std::string& frame_id)
 {
+    auto lck = mrpt::lockHelper(stateMutex_);
+
+    state_.update_last_input_stamp(timestamp);
+
     // find last KF of this frame_id before adding the new one:
     const auto lastKF = state_.last_pose_of_frame_id(frame_id);
 
@@ -196,8 +261,27 @@ void StateEstimationSmoother::fuse_pose(
     d.frameId = state_.frame_id(frame_id);
     d.pose    = pose;
 
-    state_.data.insert({timestamp, d});
+    // Help with initial pose hint:
+    KinematicState newGuess;
+    if (lastKF.has_value())
+    {
+        const auto poseIncr = pose.mean - lastKF->second.pose->pose.mean;
+        newGuess.pose       = lastKF->second.last_known_state.pose + poseIncr;
+        newGuess.twist      = lastKF->second.last_known_state.twist;
+    }
+
+    state_.data.insert({timestamp, {d, newGuess}});
     delete_too_old_entries();
+
+    MRPT_LOG_DEBUG_FMT(
+        "fuse_pose: t=%f frame='%s' p=%s sigmas=%.02e %.02e %.02e (m) %.02e "
+        "%.02e %.02e (deg)",
+        mrpt::Clock::toDouble(timestamp), frame_id.c_str(),
+        pose.mean.asString().c_str(), std::sqrt(pose.cov(0, 0)),
+        std::sqrt(pose.cov(1, 1)), std::sqrt(pose.cov(2, 2)),
+        mrpt::RAD2DEG(std::sqrt(pose.cov(3, 3))),
+        mrpt::RAD2DEG(std::sqrt(pose.cov(4, 4))),
+        mrpt::RAD2DEG(std::sqrt(pose.cov(5, 5))));
 
     // Estimate twist:
     // If we add an additional direct observation of twist, the result is
@@ -212,7 +296,7 @@ void StateEstimationSmoother::fuse_pose(
 
     mrpt::math::TTwist3D tw;
 
-    const auto incrPosePdf = pose - lastKF->second.pose;
+    const auto incrPosePdf = pose - lastKF->second.pose->pose;
     const auto incrPose    = incrPosePdf.mean;
 
     tw.vx = incrPose.x() / dt;
@@ -237,8 +321,10 @@ void StateEstimationSmoother::fuse_pose(
     auto twCov = mrpt::math::CMatrixDouble66::Zero();
     for (int i = 0; i < 3; i++)
     {
-        twCov(i, i) += mrpt::square(0.1);
-        twCov(3 + i, 3 + i) += mrpt::square(0.1);
+        twCov(i, i) +=
+            mrpt::square(params.sigma_twist_from_consecutive_poses_linear);
+        twCov(3 + i, 3 + i) +=
+            mrpt::square(params.sigma_twist_from_consecutive_poses_angular);
     }
 
     this->fuse_twist(timestamp, tw, twCov);
@@ -248,6 +334,10 @@ void StateEstimationSmoother::fuse_twist(
     const mrpt::Clock::time_point& timestamp, const mrpt::math::TTwist3D& twist,
     const mrpt::math::CMatrixDouble66& twistCov)
 {
+    auto lck = mrpt::lockHelper(stateMutex_);
+
+    state_.update_last_input_stamp(timestamp);
+
     TwistData d;
     d.twist    = twist;
     d.twistCov = twistCov;
@@ -255,6 +345,15 @@ void StateEstimationSmoother::fuse_twist(
     state_.data.insert({timestamp, d});
 
     delete_too_old_entries();
+
+    MRPT_LOG_DEBUG_FMT(
+        "fuse_twist: t=%f twist=%s sigmas=%.02e %.02e %.02e (m) %.02e %.02e "
+        "%.02e (deg)",
+        mrpt::Clock::toDouble(timestamp), twist.asString().c_str(),
+        std::sqrt(twistCov(0, 0)), std::sqrt(twistCov(1, 1)),
+        std::sqrt(twistCov(2, 2)), mrpt::RAD2DEG(std::sqrt(twistCov(3, 3))),
+        mrpt::RAD2DEG(std::sqrt(twistCov(4, 4))),
+        mrpt::RAD2DEG(std::sqrt(twistCov(5, 5))));
 }
 
 std::optional<NavState> StateEstimationSmoother::estimated_navstate(
@@ -265,6 +364,8 @@ std::optional<NavState> StateEstimationSmoother::estimated_navstate(
 
 std::set<std::string> StateEstimationSmoother::known_frame_ids()
 {
+    auto lck = mrpt::lockHelper(stateMutex_);
+
     std::set<std::string> ret;
     for (const auto& [name, id] : state_.known_frames.getDirectMap())
         ret.insert(name);
@@ -272,10 +373,30 @@ std::set<std::string> StateEstimationSmoother::known_frame_ids()
     return ret;
 }
 
+namespace
+{
+void enforce_planar_pose(mrpt::poses::CPose3D& p)
+{
+    p.z(0);
+    p.setYawPitchRoll(p.yaw(), .0, .0);
+}
+void enforce_planar_twist(mrpt::math::TTwist3D& tw)
+{
+    tw.vz = 0;
+    tw.wx = 0;
+    tw.wy = 0;
+}
+
+}  // namespace
+
 std::optional<NavState> StateEstimationSmoother::build_and_optimize_fg(
     const mrpt::Clock::time_point queryTimestamp, const std::string& frame_id)
 {
     using namespace std::string_literals;
+
+    mrpt::system::CTimeLoggerEntry tle(profiler_, "build_and_optimize_fg");
+
+    auto lck = mrpt::lockHelper(stateMutex_);
 
     delete_too_old_entries();
 
@@ -315,9 +436,9 @@ std::optional<NavState> StateEstimationSmoother::build_and_optimize_fg(
 
     using map_it_t = std::map<mrpt::Clock::time_point, PointData>::value_type;
 
-    std::vector<const map_it_t*> entries;
-    std::optional<size_t>        query_KF_id;
-    for (const auto& it : state_.data)
+    std::vector<map_it_t*> entries;
+    std::optional<size_t>  query_KF_id;
+    for (auto& it : state_.data)
     {
         if (it.first == queryTimestamp) query_KF_id = entries.size();
 
@@ -342,10 +463,18 @@ std::optional<NavState> StateEstimationSmoother::build_and_optimize_fg(
     // Init values:
     for (size_t i = 0; i < entries.size(); i++)
     {
-        state_.impl->values.insert<gtsam::Point3>(P(i), gtsam::Z_3x1);
-        state_.impl->values.insert<gtsam::Rot3>(R(i), gtsam::Rot3::Identity());
-        state_.impl->values.insert<gtsam::Point3>(V(i), gtsam::Z_3x1);
-        state_.impl->values.insert<gtsam::Point3>(W(i), gtsam::Z_3x1);
+        const auto& e = entries[i]->second;
+
+        const auto lastPose =
+            mrpt::gtsam_wrappers::toPose3(e.last_known_state.pose);
+        state_.impl->values.insert<gtsam::Point3>(P(i), lastPose.translation());
+        state_.impl->values.insert<gtsam::Rot3>(R(i), lastPose.rotation());
+
+        const auto& tw = e.last_known_state.twist;
+        state_.impl->values.insert<gtsam::Point3>(
+            V(i), gtsam::Vector3(tw.vx, tw.vy, tw.vz));
+        state_.impl->values.insert<gtsam::Point3>(
+            W(i), gtsam::Vector3(tw.wx, tw.wy, tw.wz));
     }
     for (const auto& [frameName, frameId] : state_.known_frames.getDirectMap())
     {
@@ -354,8 +483,24 @@ std::optional<NavState> StateEstimationSmoother::build_and_optimize_fg(
         // "0" (see paper diagrams!)
         if (frameId == 0) continue;
 
+        // TODO: Save and reuse last optimized value!
         state_.impl->values.insert<gtsam::Pose3>(
             F(frameId), gtsam::Pose3::Identity());
+    }
+
+    // Add planar constraints:
+    if (params.enforce_planar_motion)
+    {
+        const double XY_SIGMA       = 1e10;
+        const double Z_SIGMA        = 1e-4;
+        const auto   planar_z_noise = gtsam::noiseModel::Diagonal::Sigmas(
+              gtsam::Vector3(XY_SIGMA, XY_SIGMA, Z_SIGMA));
+
+        for (size_t i = 0; i < entries.size(); i++)
+        {
+            state_.impl->fg.addPrior(
+                P(i), gtsam::Vector3(0, 0, 0), planar_z_noise);
+        }
     }
 
     // Unary prior for initial twist:
@@ -566,6 +711,37 @@ std::optional<NavState> StateEstimationSmoother::build_and_optimize_fg(
     dQuery.query.reset();
     if (dQuery.empty()) state_.data.erase(queryTimestamp);
 
+    // Save optimized values into data entries to bootstrap optimization
+    // in next iterations:
+    // -------------------------------------------------------------------
+    for (size_t i = 0; i < entries.size(); i++)
+    {
+        auto& e = entries[i]->second;
+
+        const auto pose = gtsam::Pose3(
+            optimal.at<gtsam::Rot3>(R(i)), optimal.at<gtsam::Point3>(P(i)));
+
+        auto& ks = e.last_known_state;
+
+        ks.pose = mrpt::poses::CPose3D::FromRotationAndTranslation(
+            pose.rotation().matrix(), pose.translation());
+
+        const auto linV = optimal.at<gtsam::Vector3>(V(i));
+        const auto angV = optimal.at<gtsam::Vector3>(W(i));
+        ks.twist.vx     = linV.x();
+        ks.twist.vy     = linV.y();
+        ks.twist.vz     = linV.z();
+        ks.twist.wx     = angV.x();
+        ks.twist.wy     = angV.y();
+        ks.twist.wz     = angV.z();
+
+        if (params.enforce_planar_motion)
+        {
+            enforce_planar_pose(ks.pose);
+            enforce_planar_twist(ks.twist);
+        }
+    }
+
     // Honor requested frame_id:
     // ----------------------------------
     ASSERTMSG_(
@@ -637,15 +813,15 @@ void StateEstimationSmoother::addFactor(const mola::FactorConstVelKinematics& f)
     const auto kbWj = W(f.to_kf_);
 
     // See line 3 of eq (4) in the MOLA RSS2019 paper
-    // Modify to use velocity in local frame: reuse FactorConstAngularVelocity
+    // Modify to use velocity in local frame: reuse FactorConstLocalVelocity
     // here too:
-    state_.impl->fg.emplace_shared<FactorConstAngularVelocity>(
+    state_.impl->fg.emplace_shared<FactorConstLocalVelocity>(
         kRi, kbVi, kRj, kbVj,
         gtsam::noiseModel::Isotropic::Sigma(3, std_linvel * dt));
 
     // \omega is in the body frame, we need a special factor to rotate it:
     // See line 4 of eq (4) in the MOLA RSS2019 paper.
-    state_.impl->fg.emplace_shared<FactorConstAngularVelocity>(
+    state_.impl->fg.emplace_shared<FactorConstLocalVelocity>(
         kRi, kbWi, kRj, kbWj,
         gtsam::noiseModel::Isotropic::Sigma(3, std_angvel * dt));
 
@@ -666,8 +842,16 @@ void StateEstimationSmoother::addFactor(const mola::FactorConstVelKinematics& f)
         kRi, kbWi, kRj, dt, noise_kinematicsOrientation);
 }
 
+void StateEstimationSmoother::addFactor(const mola::FactorTricycleKinematics& f)
+{
+    THROW_EXCEPTION("Write me!");
+    (void)f;
+}
+
 void StateEstimationSmoother::delete_too_old_entries()
 {
+    auto lck = mrpt::lockHelper(stateMutex_);
+
     if (state_.data.empty()) return;
 
     const double newestTime =

@@ -26,7 +26,9 @@
 #pragma once
 
 // this package:
+#include <mola_kernel/interfaces/LocalizationSourceBase.h>
 #include <mola_kernel/interfaces/NavStateFilter.h>
+#include <mola_state_estimation_smoother/FactorTricycleKinematics.h>
 #include <mola_state_estimation_smoother/Parameters.h>
 
 // MOLA:
@@ -37,12 +39,15 @@
 #include <mrpt/containers/bimap.h>
 #include <mrpt/containers/yaml.h>
 #include <mrpt/core/pimpl.h>
+#include <mrpt/obs/CObservationGPS.h>
 #include <mrpt/obs/CObservationIMU.h>
 #include <mrpt/obs/CObservationOdometry.h>
 #include <mrpt/poses/CPose3DPDFGaussian.h>
 #include <mrpt/system/COutputLogger.h>
+#include <mrpt/system/CTimeLogger.h>
 
 // std:
+#include <mutex>
 #include <optional>
 #include <set>
 
@@ -59,6 +64,8 @@ namespace mola::state_estimation_smoother
  * - Internally, the first frame of reference will be used as "global"
  *   coordinates, despite it may be actually either a `map` or `odom` frame, in
  *   the [ROS REP 105](https://www.ros.org/reps/rep-0105.html) sense.
+ * - When publishing the vehicle pose in a timely manner, the reference frame
+ *   is that defined in "params.reference_frame_name".
  * - IMU readings are, by definition, given in the robot body frame, although
  *   they can have a relative transformation between the vehicle and sensor.
  *
@@ -89,7 +96,8 @@ namespace mola::state_estimation_smoother
  *
  * \ingroup mola_state_estimation_grp
  */
-class StateEstimationSmoother : public mola::NavStateFilter
+class StateEstimationSmoother : public mola::NavStateFilter,
+                                public mola::LocalizationSourceBase
 {
     DEFINE_MRPT_OBJECT(StateEstimationSmoother, mola::state_estimation_smoother)
 
@@ -193,19 +201,41 @@ class StateEstimationSmoother : public mola::NavStateFilter
         QueryPointData() = default;
     };
 
+    struct KinematicState
+    {
+        mrpt::poses::CPose3D pose;
+        mrpt::math::TTwist3D twist;
+    };
+
     struct PointData
     {
         PointData() = default;
 
-        PointData(const PoseData& p) : pose(p) {}
-        PointData(const OdomData& p) : odom(p) {}
-        PointData(const TwistData& p) : twist(p) {}
-        PointData(const QueryPointData& p) : query(p) {}
+        PointData(const PoseData& p, const KinematicState& ks = {})
+            : pose(p), last_known_state(ks)
+        {
+        }
+        PointData(const OdomData& p, const KinematicState& ks = {})
+            : odom(p), last_known_state(ks)
+        {
+        }
+        PointData(const TwistData& p, const KinematicState& ks = {})
+            : twist(p), last_known_state(ks)
+        {
+        }
+        PointData(const QueryPointData& p, const KinematicState& ks = {})
+            : query(p), last_known_state(ks)
+        {
+        }
 
         std::optional<PoseData>       pose;
         std::optional<OdomData>       odom;
         std::optional<TwistData>      twist;
         std::optional<QueryPointData> query;
+
+        // Estimation from last iteration, or initial guess,
+        // to make estimation faster starting closer to the real values:
+        KinematicState last_known_state;
 
         std::string asString() const;
 
@@ -229,10 +259,31 @@ class StateEstimationSmoother : public mola::NavStateFilter
         std::map<mrpt::Clock::time_point, PointData> data;
 
         auto last_pose_of_frame_id(const std::string& frame_id)
-            -> std::optional<std::pair<mrpt::Clock::time_point, PoseData>>;
+            -> std::optional<std::pair<mrpt::Clock::time_point, PointData>>;
+
+        void update_last_input_stamp(const mrpt::Clock::time_point& t)
+        {
+            last_observation_stamp_           = t;
+            last_observation_wallclock_stamp_ = mrpt::Clock::now();
+        }
+
+        std::optional<mrpt::Clock::time_point> get_current_extrapolated_stamp()
+            const
+        {
+            if (!last_observation_stamp_) return {};
+            return mrpt::Clock::fromDouble(
+                (mrpt::Clock::nowDouble() -
+                 mrpt::Clock::toDouble(last_observation_wallclock_stamp_)) +
+                mrpt::Clock::toDouble(*last_observation_stamp_));
+        }
+
+       private:
+        std::optional<mrpt::Clock::time_point> last_observation_stamp_;
+        mrpt::Clock::time_point last_observation_wallclock_stamp_;
     };
 
-    State state_;
+    State                state_;
+    std::recursive_mutex stateMutex_;
 
     std::optional<NavState> build_and_optimize_fg(
         const mrpt::Clock::time_point queryTimestamp,
@@ -240,8 +291,11 @@ class StateEstimationSmoother : public mola::NavStateFilter
 
     /// Implementation of Eqs (1),(4) in the MOLA RSS2019 paper.
     void addFactor(const mola::FactorConstVelKinematics& f);
+    void addFactor(const mola::FactorTricycleKinematics& f);
 
     void delete_too_old_entries();
+
+    mrpt::system::CTimeLogger profiler_{true, "StateEstimationSmoother"};
 };
 
 }  // namespace mola::state_estimation_smoother

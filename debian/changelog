@@ -1,0 +1,35 @@
+ros-kilted-mola-state-estimation (1.8.0-2noble) noble; urgency=high
+
+
+
+ -- Jose-Luis Blanco-Claraco <jlblanco@ual.es>  Sat, 15 Mar 2025 05:00:00 -0000
+
+ros-kilted-mola-state-estimation (1.7.0-2noble) noble; urgency=high
+
+
+
+ -- Jose-Luis Blanco-Claraco <jlblanco@ual.es>  Sat, 22 Feb 2025 06:00:00 -0000
+
+ros-kilted-mola-state-estimation (1.6.1-2noble) noble; urgency=high
+
+  * Fix package.xml URLs
+  * Contributors: Jose Luis Blanco-Claraco
+
+ -- Jose-Luis Blanco-Claraco <jlblanco@ual.es>  Fri, 10 Jan 2025 06:00:00 -0000
+
+ros-kilted-mola-state-estimation (1.6.0-2noble) noble; urgency=high
+
+  * docs: link to main sphinx page
+  * add metapackage for easy installation of all packages
+  * Contributors: Jose Luis Blanco-Claraco
+
+ -- Jose-Luis Blanco-Claraco <jlblanco@ual.es>  Fri, 03 Jan 2025 06:00:00 -0000
+
+ros-kilted-mola-state-estimation (1.5.0-2noble) noble; urgency=high
+
+  * Move state estimation packages out of this repo to its own: https://github.com/MOLAorg/mola_state_estimation
+  * Contributors: Jose Luis Blanco-Claraco
+
+ -- Jose-Luis Blanco-Claraco <jlblanco@ual.es>  Thu, 26 Dec 2024 06:00:00 -0000
+
+

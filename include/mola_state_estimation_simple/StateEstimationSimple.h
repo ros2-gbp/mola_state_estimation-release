@@ -67,7 +67,6 @@ class StateEstimationSimple : public mola::NavStateFilter, public mola::RawDataC
 
    public:
     StateEstimationSimple();
-    ~StateEstimationSimple() = default;
 
     /** \name Main API
      *  @{ */
@@ -139,6 +138,7 @@ class StateEstimationSimple : public mola::NavStateFilter, public mola::RawDataC
         std::optional<mrpt::Clock::time_point>         last_pose_obs_tim;
         std::optional<mrpt::poses::CPose3DPDFGaussian> last_pose;
         std::optional<mrpt::math::TTwist3D>            last_twist;
+        std::optional<mrpt::math::CMatrixDouble66>     last_twist_cov;
         bool                                           pose_already_updated_with_odom = false;
     };
 

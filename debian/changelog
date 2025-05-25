@@ -1,0 +1,42 @@
+ros-kilted-mola-state-estimation (1.8.1-1bookworm) bookworm; urgency=high
+
+  * package.xml: update license tag to BSD-3-Clause
+  * Contributors: Jose Luis Blanco-Claraco
+
+ -- Jose-Luis Blanco-Claraco <jlblanco@ual.es>  Sat, 24 May 2025 22:00:00 -0000
+
+ros-kilted-mola-state-estimation (1.8.0-1bookworm) bookworm; urgency=high
+
+
+
+ -- Jose-Luis Blanco-Claraco <jlblanco@ual.es>  Fri, 14 Mar 2025 23:00:00 -0000
+
+ros-kilted-mola-state-estimation (1.7.0-1bookworm) bookworm; urgency=high
+
+
+
+ -- Jose-Luis Blanco-Claraco <jlblanco@ual.es>  Fri, 21 Feb 2025 23:00:00 -0000
+
+ros-kilted-mola-state-estimation (1.6.1-1bookworm) bookworm; urgency=high
+
+  * Fix package.xml URLs
+  * Contributors: Jose Luis Blanco-Claraco
+
+ -- Jose-Luis Blanco-Claraco <jlblanco@ual.es>  Thu, 09 Jan 2025 23:00:00 -0000
+
+ros-kilted-mola-state-estimation (1.6.0-1bookworm) bookworm; urgency=high
+
+  * docs: link to main sphinx page
+  * add metapackage for easy installation of all packages
+  * Contributors: Jose Luis Blanco-Claraco
+
+ -- Jose-Luis Blanco-Claraco <jlblanco@ual.es>  Thu, 02 Jan 2025 23:00:00 -0000
+
+ros-kilted-mola-state-estimation (1.5.0-1bookworm) bookworm; urgency=high
+
+  * Move state estimation packages out of this repo to its own: https://github.com/MOLAorg/mola_state_estimation
+  * Contributors: Jose Luis Blanco-Claraco
+
+ -- Jose-Luis Blanco-Claraco <jlblanco@ual.es>  Wed, 25 Dec 2024 23:00:00 -0000
+
+

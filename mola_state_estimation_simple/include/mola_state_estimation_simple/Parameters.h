@@ -41,8 +41,7 @@ namespace mola::state_estimation_simple
 class Parameters
 {
    public:
-    Parameters()  = default;
-    ~Parameters() = default;
+    Parameters() = default;
 
     /// Loads all parameters from a YAML map node.
     void loadFrom(const mrpt::containers::yaml& cfg);
@@ -54,7 +53,12 @@ class Parameters
     mrpt::math::TTwist3D initial_twist;
 
     double sigma_random_walk_acceleration_linear  = 1.0;  // [m/s²]
-    double sigma_random_walk_acceleration_angular = 1.0;  // [rad/s²]
+    double sigma_random_walk_acceleration_angular = 10.0;  // [rad/s²]
+
+    double sigma_relative_pose_linear  = 1.0;  // [m]
+    double sigma_relative_pose_angular = 0.1;  // [rad]
+
+    double sigma_imu_angular_velocity = 0.05;  // [rad/s]
 
     bool enforce_planar_motion = false;
 

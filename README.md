@@ -1,3 +1,30 @@
+## mola_state_estimation (kilted) - 1.8.1-1
+
+The packages in the `mola_state_estimation` repository were released into the `kilted` distro by running `/home/jlblanco/code/bloom-venv/bin/bloom-release -r kilted -y mola_state_estimation` on `Sun, 25 May 2025 15:42:25 -0000`
+
+These packages were released:
+- `mola_imu_preintegration`
+- `mola_state_estimation`
+- `mola_state_estimation_simple`
+- `mola_state_estimation_smoother`
+
+Version of package(s) in repository `mola_state_estimation`:
+
+- upstream repository: https://github.com/MOLAorg/mola_state_estimation.git
+- release repository: https://github.com/ros2-gbp/mola_state_estimation-release.git
+- rosdistro version: `1.8.0-2`
+- old version: `1.8.0-2`
+- new version: `1.8.1-1`
+
+Versions of tools used:
+
+- bloom version: `0.11.2`
+- catkin_pkg version: `0.5.2`
+- rosdep version: `0.22.2`
+- rosdistro version: `0.9.0`
+- vcstools version: `0.1.42`
+
+
 ## mola_state_estimation (jazzy) - 1.8.1-1
 
 The packages in the `mola_state_estimation` repository were released into the `jazzy` distro by running `/home/jlblanco/code/bloom-venv/bin/bloom-release -r jazzy -y mola_state_estimation` on `Sun, 25 May 2025 15:39:46 -0000`

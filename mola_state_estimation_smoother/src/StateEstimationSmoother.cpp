@@ -135,13 +135,16 @@ void StateEstimationSmoother::initialize(const mrpt::containers::yaml& cfg)
 
     // Load params:
     params.loadFrom(cfg["params"]);
+
+    // Initialize parent:
+    mola::NavStateFilter::initialize(cfg);
 }
 
 void StateEstimationSmoother::spinOnce()
 {
     // At the predefined module rate, publish the current estimation,
     // if we have any subscriber:
-    if (!anyUpdateLocalizationSubscriber()) return;
+    if (!anyUpdateLocalizationSubscriber()) { return; }
 
     auto lck = mrpt::lockHelper(stateMutex_);
 
@@ -380,23 +383,25 @@ void StateEstimationSmoother::onNewObservation(const CObservation::Ptr& o)
     // IMU:
     if (auto obsIMU = std::dynamic_pointer_cast<mrpt::obs::CObservationIMU>(o);
         obsIMU &&
-        std::regex_match(o->sensorLabel, params.do_process_imu_labels))
+        std::regex_match(o->sensorLabel, params.do_process_imu_labels_re))
     {
         this->fuse_imu(*obsIMU);
     }
     // Odometry source:
     else if (auto obsOdom =
                  std::dynamic_pointer_cast<mrpt::obs::CObservationOdometry>(o);
-             obsOdom && std::regex_match(
-                            o->sensorLabel, params.do_process_odometry_labels))
+             obsOdom &&
+             std::regex_match(
+                 o->sensorLabel, params.do_process_odometry_labels_re))
     {
         this->fuse_odometry(*obsOdom, o->sensorLabel);
     }
     // GNSS source:
     else if (auto obsGPS =
                  std::dynamic_pointer_cast<mrpt::obs::CObservationGPS>(o);
-             obsGPS && std::regex_match(
-                           o->sensorLabel, params.do_process_odometry_labels))
+             obsGPS &&
+             std::regex_match(
+                 o->sensorLabel, params.do_process_odometry_labels_re))
     {
         this->fuse_gnss(*obsGPS);
     }

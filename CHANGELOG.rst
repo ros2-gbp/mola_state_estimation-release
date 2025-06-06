@@ -2,6 +2,9 @@
 Changelog for package mola_state_estimation
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.9.0 (2025-06-06)
+------------------
+
 1.8.1 (2025-05-25)
 ------------------
 * package.xml: update license tag to BSD-3-Clause

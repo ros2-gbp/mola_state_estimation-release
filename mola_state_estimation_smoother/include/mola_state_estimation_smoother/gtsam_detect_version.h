@@ -12,19 +12,14 @@
  alone or in combination with the complete SLAM system.
 */
 
-/**
- * @file   register.cpp
- * @brief  Register RTTI classes
- * @author Jose Luis Blanco Claraco
- * @date   Sep 18, 2021
- */
+#pragma once
 
-// #include <mola_imu_preintegration/IMUIntegrationPublisher.h>
-#include <mrpt/core/initializer.h>
+#include <gtsam/config.h>
 
-// using namespace mola;
+#define GTSAM_VERSION_AT_LEAST(major, minor, patch)                       \
+    ((GTSAM_VERSION_MAJOR > (major)) ||                                   \
+     (GTSAM_VERSION_MAJOR == (major) && GTSAM_VERSION_MINOR > (minor)) || \
+     (GTSAM_VERSION_MAJOR == (major) && GTSAM_VERSION_MINOR == (minor) && \
+      GTSAM_VERSION_PATCH >= (patch)))
 
-MRPT_INITIALIZER(do_register_imu_preintegration)
-{
-    //  MOLA_REGISTER_MODULE(IMUIntegrationPublisher);
-}
+#define GTSAM_USES_BOOST (!GTSAM_VERSION_AT_LEAST(4, 3, 0))

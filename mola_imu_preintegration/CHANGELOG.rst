@@ -2,6 +2,13 @@
 Changelog for package mola_imu_preintegration
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.10.0 (2025-09-07)
+-------------------
+* Add class ImuTransformer
+* Update copyright notice
+* Import IMU initialization class ImuInitialCalibrator, refactored from the mola LO package
+* Contributors: Jose Luis Blanco-Claraco
+
 1.9.0 (2025-06-06)
 ------------------
 

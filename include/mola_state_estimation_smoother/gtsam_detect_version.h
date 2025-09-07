@@ -12,17 +12,14 @@
  alone or in combination with the complete SLAM system.
 */
 
-/**
- * @file   register.cpp
- * @brief  Register RTTI classes
- * @author Jose Luis Blanco Claraco
- * @date   Sep 18, 2021
- */
+#pragma once
 
-#include <mola_state_estimation_smoother/StateEstimationSmoother.h>
-#include <mrpt/core/initializer.h>
+#include <gtsam/config.h>
 
-MRPT_INITIALIZER(do_register_navstate_fuse)
-{
-    MOLA_REGISTER_MODULE(mola::state_estimation_smoother::StateEstimationSmoother);
-}
+#define GTSAM_VERSION_AT_LEAST(major, minor, patch)                       \
+    ((GTSAM_VERSION_MAJOR > (major)) ||                                   \
+     (GTSAM_VERSION_MAJOR == (major) && GTSAM_VERSION_MINOR > (minor)) || \
+     (GTSAM_VERSION_MAJOR == (major) && GTSAM_VERSION_MINOR == (minor) && \
+      GTSAM_VERSION_PATCH >= (patch)))
+
+#define GTSAM_USES_BOOST (!GTSAM_VERSION_AT_LEAST(4, 3, 0))

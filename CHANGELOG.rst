@@ -2,6 +2,12 @@
 Changelog for package mola_state_estimation_simple
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.10.0 (2025-09-07)
+-------------------
+* Update copyright notice
+* Make unhandled sensor input topic message less verbose
+* Contributors: Jose Luis Blanco-Claraco
+
 1.9.0 (2025-06-06)
 ------------------
 * State estimation interface is now raw data consumer too

@@ -1,0 +1,12 @@
+Source: ros-rolling-mola-georeferencing
+Section: misc
+Priority: optional
+Maintainer: Jose-Luis Blanco-Claraco <joseluisblancoc@gmail.com>
+Build-Depends: debhelper (>= 9.0.0), cmake, ros-rolling-gtsam, ros-rolling-mola-common, ros-rolling-mola-gtsam-factors, ros-rolling-mola-yaml, ros-rolling-mp2p-icp, ros-rolling-mrpt-libmaps, ros-rolling-mrpt-libtclap, ros-rolling-ros-workspace
+Homepage: https://docs.mola-slam.org/
+Standards-Version: 3.9.2
+
+Package: ros-rolling-mola-georeferencing
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ros-rolling-gtsam, ros-rolling-mola-common, ros-rolling-mola-gtsam-factors, ros-rolling-mola-yaml, ros-rolling-mp2p-icp, ros-rolling-mrpt-libmaps, ros-rolling-mrpt-libtclap, ros-rolling-ros-workspace
+Description: C++ library for georeferencing key-frame maps (simplemaps) and related CLI tools

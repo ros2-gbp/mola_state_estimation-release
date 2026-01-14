@@ -5,7 +5,7 @@
 -->
 <package format="3">
   <name>mola_state_estimation_smoother</name>
-  <version>1.11.1</version>
+  <version>2.0.0</version>
   <description>SE(3) pose and twist path data fusion estimator</description>
 
   <maintainer email="joseluisblancoc@gmail.com">Jose-Luis Blanco-Claraco</maintainer>
@@ -13,15 +13,26 @@
 
   <url type="website">https://github.com/MOLAorg/mola_state_estimation</url>
 
+  <!-- Entries to make ROS 2 to discover this as a proper package -->
+  <build_depend>ros_environment</build_depend>
+
+  <build_depend>ament_cmake_xmllint</build_depend>
+
+  <buildtool_depend>cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_gtest</buildtool_depend>
+  <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>mola_common</depend>
   <depend>mola_kernel</depend>
   <depend>mola_imu_preintegration</depend>
+  <depend>mola_gtsam_factors</depend>
 
   <depend>mrpt_libobs</depend>
 
   <!-- GTSAM and its Boost deps -->
   <depend>gtsam</depend>
+
+  <!-- Remove all these for GTSAM >=2.3 !! -->
   <build_depend>libboost-serialization-dev</build_depend>
   <build_depend>libboost-system-dev</build_depend>
   <build_depend>libboost-filesystem-dev</build_depend>
@@ -32,14 +43,13 @@
   <build_depend>libboost-chrono-dev</build_depend>
   <build_depend>libboost-regex-dev</build_depend>
 
+  <!-- Needed by the mola-cli launch files -->
+  <exec_depend>mola_launcher</exec_depend>
 
   <doc_depend>doxygen</doc_depend>
 
-  <!-- Minimum entries to release non-catkin pkgs: -->
-  <buildtool_depend>cmake</buildtool_depend>
   <export>
-    <build_type>cmake</build_type>
-  </export>
-  <!-- End -->
+    <build_type>ament_cmake</build_type>
+  </export>  
 
 </package>

@@ -1,0 +1,12 @@
+Source: ros-humble-mola-georeferencing
+Section: misc
+Priority: optional
+Maintainer: Jose-Luis Blanco-Claraco <joseluisblancoc@gmail.com>
+Build-Depends: debhelper (>= 9.0.0), cmake, ros-humble-gtsam, ros-humble-mola-common, ros-humble-mola-gtsam-factors, ros-humble-mola-yaml, ros-humble-mp2p-icp, ros-humble-mrpt-libmaps, ros-humble-mrpt-libtclap, ros-humble-ros-workspace
+Homepage: https://docs.mola-slam.org/
+Standards-Version: 3.9.2
+
+Package: ros-humble-mola-georeferencing
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ros-humble-gtsam, ros-humble-mola-common, ros-humble-mola-gtsam-factors, ros-humble-mola-yaml, ros-humble-mp2p-icp, ros-humble-mrpt-libmaps, ros-humble-mrpt-libtclap, ros-humble-ros-workspace
+Description: C++ library for georeferencing key-frame maps (simplemaps) and related CLI tools

@@ -1,0 +1,32 @@
+ros-humble-mola-georeferencing (2.0.1-1jammy) jammy; urgency=high
+
+  * Fix potential bug in sm_georeferencing
+  * Merge pull request #11 <https://github.com/MOLAorg/mola_state_estimation/issues/11> from MOLAorg/feat/improve-docs
+    Improve docs for mola_gtsam_factors
+  * Add missing #include for gtsam
+  * Contributors: Jose Luis Blanco-Claraco
+
+ -- Jose-Luis Blanco-Claraco <joseluisblancoc@gmail.com>  Wed, 14 Jan 2026 23:00:00 -0000
+
+ros-humble-mola-georeferencing (2.0.0-1jammy) jammy; urgency=high
+
+  * Merge pull request #7 <https://github.com/MOLAorg/mola_state_estimation/issues/7> from MOLAorg/feature/tricycle-kinematic
+    Add tricycle kinematics
+  * lint clean ups
+  * Copyright year bump
+  * Merge pull request #10 <https://github.com/MOLAorg/mola_state_estimation/issues/10> from MOLAorg/feature/add-georef-tests
+    Add georeference unit tests
+  * Add georef unit test
+  * Merge pull request #5 <https://github.com/MOLAorg/mola_state_estimation/issues/5> from MOLAorg/feature/fuse-gnss-imu-odom
+    Refactor: new packages mola_georeferencing, mola_gtsam_factors, functional smoother state estimator
+  * Make mola_gtsam_factors non headers-only and rename GNSS2ENU as GnssEnu for consistency
+  * process CObservationRobotPose
+  * integrate code coverage in cmake
+  * package.xml: add FILE to license tags
+  * Refactor to expose all gtsam factors into a new library 'mola_gtsam_factors'
+  * new package mola_georeferencing, imported and refactored from mola_sm_loop_closure
+  * Contributors: Jose Luis Blanco-Claraco
+
+ -- Jose-Luis Blanco-Claraco <joseluisblancoc@gmail.com>  Tue, 13 Jan 2026 23:00:00 -0000
+
+

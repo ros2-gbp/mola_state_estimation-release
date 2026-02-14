@@ -2,6 +2,9 @@
 Changelog for package mola_gtsam_factors
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+2.1.0 (2026-02-14)
+------------------
+
 2.0.1 (2026-01-15)
 ------------------
 * Fix potential bug in sm_georeferencing

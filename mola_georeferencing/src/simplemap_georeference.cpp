@@ -18,6 +18,10 @@
 #include <mrpt/topography/conversions.h>
 
 // gtsam factors:
+#include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
+#include <gtsam/nonlinear/Marginals.h>
+#include <gtsam/slam/BetweenFactor.h>
+#include <gtsam/slam/PriorFactor.h>
 #include <mola_gtsam_factors/FactorGnssEnu.h>
 
 mola::SMGeoReferencingOutput mola::simplemap_georeference(
@@ -79,16 +83,18 @@ mola::SMGeoReferencingOutput mola::simplemap_georeference(
            << "(rmse=" << rmseEnd << ") , for " << smFrames.frames.size()
            << " frames, GTSAM sigmas: " << mrpt::RAD2DEG(stds[0]) << " [deg], "
            << mrpt::RAD2DEG(stds[1]) << " [deg], " << mrpt::RAD2DEG(stds[2]) << " [deg], "
-           << stds[3] << " [m], " << stds[4] << " [m], " << stds[4] << " [m]";
+           << stds[3] << " [m], " << stds[4] << " [m], " << stds[5] << " [m]";
         params.logger->logStr(mrpt::system::LVL_INFO, ss.str());
     }
 
     // store results:
-    ret.geo_ref.T_enu_to_map = {
+    ret.geo_ref.emplace();
+
+    ret.geo_ref->T_enu_to_map = {
         mrpt::poses::CPose3D(mrpt::gtsam_wrappers::toTPose3D(T0)),
         mrpt::gtsam_wrappers::to_mrpt_se3_cov6(T0_cov)};
 
-    ret.geo_ref.geo_coord = *smFrames.refCoord;
+    ret.geo_ref->geo_coord = *smFrames.refCoord;
 
     ret.final_rmse = rmseEnd;
 
@@ -143,6 +149,7 @@ mola::GNSSFrames mola::extract_gnss_frames_from_sm(
             if (f.sigma_E <= 0 || f.sigma_N <= 0 || f.sigma_U <= 0 || std::isnan(f.sigma_E) ||
                 std::isnan(f.sigma_N) || std::isnan(f.sigma_U))
             {
+                ret.frames.pop_back();  // Remove invalid entry
                 continue;  // skip invalid entry
             }
 

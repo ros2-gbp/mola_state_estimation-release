@@ -1,0 +1,12 @@
+Source: ros-kilted-mola-gtsam-factors
+Section: misc
+Priority: optional
+Maintainer: Jose-Luis Blanco-Claraco <joseluisblancoc@gmail.com>
+Build-Depends: debhelper (>= 9.0.0), cmake, ros-kilted-gtsam, ros-kilted-mola-common, ros-kilted-mrpt-libposes, ros-kilted-ros-workspace
+Homepage: https://docs.mola-slam.org/
+Standards-Version: 3.9.2
+
+Package: ros-kilted-mola-gtsam-factors
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ros-kilted-gtsam, ros-kilted-mola-common, ros-kilted-mrpt-libposes, ros-kilted-ros-workspace
+Description: C++ library with reusable GTSAM Factors useful in georeferencing and state-estimation MOLA modules

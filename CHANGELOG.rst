@@ -2,6 +2,30 @@
 Changelog for package mola_state_estimation_smoother
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+2.1.0 (2026-02-14)
+------------------
+* Merge pull request `#13 <https://github.com/MOLAorg/mola_state_estimation/issues/13>`_ from MOLAorg/feat/publish-georef-on-converge
+  Publish geo-ref on convergence
+* get onObservation() and has_converged_localization() method tested too
+* Refactor publish georef and sensor label regex
+  fix filtering observations by sensor label regex
+  refactor to publish georef on converged automatically
+  fix build against older mola_kernel
+  Fix wrong logic in GNSS fuse
+* remove old mola version guards
+* unit test: relax threshold to avoid spurious failures
+* Publish geo-ref on convergence
+  add new params to yaml file
+* Contributors: Jose Luis Blanco-Claraco
+
+2.0.1 (2026-01-15)
+------------------
+* test: less strict limits to avoid random failures
+* cmake: Remove non-used find_package() for ament_lint_auto
+* Merge pull request `#11 <https://github.com/MOLAorg/mola_state_estimation/issues/11>`_ from MOLAorg/feat/improve-docs
+  Improve docs for mola_gtsam_factors
+* Contributors: Jose Luis Blanco-Claraco
+
 2.0.0 (2026-01-14)
 ------------------
 * Merge pull request `#7 <https://github.com/MOLAorg/mola_state_estimation/issues/7>`_ from MOLAorg/feature/tricycle-kinematic

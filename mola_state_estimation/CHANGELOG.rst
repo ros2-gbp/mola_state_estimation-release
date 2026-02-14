@@ -2,6 +2,12 @@
 Changelog for package mola_state_estimation
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+2.1.0 (2026-02-14)
+------------------
+
+2.0.1 (2026-01-15)
+------------------
+
 2.0.0 (2026-01-14)
 ------------------
 * Merge pull request `#5 <https://github.com/MOLAorg/mola_state_estimation/issues/5>`_ from MOLAorg/feature/fuse-gnss-imu-odom

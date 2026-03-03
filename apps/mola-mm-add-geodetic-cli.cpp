@@ -112,13 +112,12 @@ void add_geodetic_fields_to_layer(
     mrpt::maps::CPointsMap& pointMap, const mp2p_icp::metric_map_t::Georeferencing& georef,
     bool verbose)
 {
-#if MRPT_VERSION >= 0x020f02  // 2.15.2 introduced "double" fields
-
     const size_t numPoints = pointMap.size();
 
     if (verbose)
     {
-        std::cout << "  Processing " << numPoints << " points..." << "\n";
+        std::cout << "  Processing " << numPoints << " points..."
+                  << "\n";
     }
 
     // Create the double fields for geodetic coordinates:
@@ -204,12 +203,9 @@ void add_geodetic_fields_to_layer(
 
     if (verbose)
     {
-        std::cout << "  Done processing layer." << "\n";
+        std::cout << "  Done processing layer."
+                  << "\n";
     }
-#else
-    THROW_EXCEPTION(
-        "This functionality requires MRPT version 2.15.2 or newer (for double fields support).");
-#endif
 }
 
 void run_add_geodetic(Cli& cli)
@@ -246,7 +242,8 @@ void run_add_geodetic(Cli& cli)
 
     if (mm.georeferencing.has_value())
     {
-        std::cout << "[mola-mm-add-geodetic] Using embedded georeferencing from map." << "\n";
+        std::cout << "[mola-mm-add-geodetic] Using embedded georeferencing from map."
+                  << "\n";
         georef = mm.georeferencing;
     }
     else if (cli.argGeoRefFile.isSet())
@@ -268,11 +265,24 @@ void run_add_geodetic(Cli& cli)
     // Display georeferencing info
     if (verbose)
     {
-        std::cout << "[mola-mm-add-geodetic] Georeferencing information:" << "\n";
-        std::cout << "  Reference geodetic coordinates (WGS84):" << "\n";
+        std::cout << "[mola-mm-add-geodetic] Georeferencing information:"
+                  << "\n";
+        std::cout << "  Reference geodetic coordinates (WGS84):"
+                  << "\n";
         std::cout << "    Latitude:  " << georef->geo_coord.lat.getAsString() << "\n";
         std::cout << "    Longitude: " << georef->geo_coord.lon.getAsString() << "\n";
-        std::cout << "    Height:    " << georef->geo_coord.height << " m" << "\n";
+        std::cout << "    Height:    " << georef->geo_coord.height << " m"
+                  << "\n";
+    }
+
+    // We may have a .georef file, estimated from IMU only so the ENU frame is defined, but
+    // without geodetic coordinates. Then, returns and exist without creating a new output map:
+    if (georef->geo_coord.isClear())
+    {
+        std::cout << "[mola-mm-add-geodetic] Georeferencing file does not contain valid geodetic "
+                     "coordinates. No geodetic fields will be added.\n";
+        std::cout << "[mola-mm-add-geodetic] Exiting without creating output map.\n";
+        return;
     }
 
     // Determine which layers to process
@@ -311,7 +321,8 @@ void run_add_geodetic(Cli& cli)
         {
             std::cout << "Skipping layer '" << layerName
                       << "' (not a CPointsMap-derived type, type is: "
-                      << it->second->GetRuntimeClass()->className << ")" << "\n";
+                      << it->second->GetRuntimeClass()->className << ")"
+                      << "\n";
             continue;
         }
 
@@ -335,7 +346,8 @@ void run_add_geodetic(Cli& cli)
         throw std::runtime_error("Failed to save output map file: " + filOutput);
     }
 
-    std::cout << "[mola-mm-add-geodetic] Done! Output map saved successfully." << "\n";
+    std::cout << "[mola-mm-add-geodetic] Done! Output map saved successfully."
+              << "\n";
 }
 
 }  // namespace

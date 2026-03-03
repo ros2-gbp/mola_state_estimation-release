@@ -47,6 +47,14 @@ struct Cli
         "1.0",
         cmd};
 
+    TCLAP::ValueArg<double> argIMUGravitySigmaDeg{"",
+                                                  "imu-gravity-sigma-deg",
+                                                  "IMU gravity alignment uncertainty (degrees).",
+                                                  false,
+                                                  3.0,
+                                                  "3.0",
+                                                  cmd};
+
     TCLAP::ValueArg<std::string> argPlugins{
         "l",
         "load-plugins",
@@ -56,6 +64,12 @@ struct Cli
         "foobar.so",
         "foobar.so",
         cmd};
+
+    TCLAP::SwitchArg argNoIMUGravity{
+        "", "no-imu-gravity",
+        "Disable using IMU acceleration data for gravity alignment "
+        "(enabled by default).",
+        cmd, false};
 
     TCLAP::ValueArg<std::string> arg_verbosity_level{
         "v",   "verbosity", "Verbosity level: ERROR|WARN|INFO|DEBUG (Default: INFO)",
@@ -103,6 +117,15 @@ void run_sm_georef(Cli& cli)
     }
     // TODO: p.fgParams.minimumUncertaintyXYZ = xxx;
 
+    if (cli.argNoIMUGravity.getValue())
+    {
+        p.useIMUGravityAlignment = false;
+    }
+    if (cli.argIMUGravitySigmaDeg.isSet())
+    {
+        p.imuGravityParams.imuGravitySigmaDeg = cli.argIMUGravitySigmaDeg.getValue();
+    }
+
     const mola::SMGeoReferencingOutput smGeo = mola::simplemap_georeference(sm, p);
 
     if (!smGeo.geo_ref.has_value())
@@ -129,7 +152,12 @@ void run_sm_georef(Cli& cli)
         std::cout << "[mola-sm-georeferencing-cli] Loading mm map: '"
                   << cli.argWriteMMInto.getValue() << "'..." << std::endl;
 
-        mm.load_from_file(cli.argWriteMMInto.getValue());
+        const bool loadOk = mm.load_from_file(cli.argWriteMMInto.getValue());
+        if (!loadOk)
+        {
+            THROW_EXCEPTION_FMT(
+                "Error loading input map file: '%s'", cli.argWriteMMInto.getValue().c_str());
+        }
 
         // overwrite metadata:
         mm.georeferencing = smGeo.geo_ref;

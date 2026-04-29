@@ -211,15 +211,8 @@ mola::GNSSFrames mola::extract_gnss_frames_from_sm(
                 f.sigma_U = f.sigma_E;
             }
 
-            const bool invalid_sigmas =
-                (f.sigma_E <= 0 || f.sigma_N <= 0 || f.sigma_U <= 0 || std::isnan(f.sigma_E) ||
-                 std::isnan(f.sigma_N) || std::isnan(f.sigma_U));
-
-            const bool invalid_geodetic =
-                (f.gga.fields.latitude_degrees == 0 && f.gga.fields.longitude_degrees == 0 &&
-                 f.gga.fields.altitude_meters == 0);
-
-            if (invalid_sigmas || invalid_geodetic)
+            if (f.sigma_E <= 0 || f.sigma_N <= 0 || f.sigma_U <= 0 || std::isnan(f.sigma_E) ||
+                std::isnan(f.sigma_N) || std::isnan(f.sigma_U))
             {
                 ret.frames.pop_back();  // Remove invalid entry
                 continue;  // skip invalid entry

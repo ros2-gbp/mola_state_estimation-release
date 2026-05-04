@@ -1,0 +1,12 @@
+Source: ros-humble-mola-gtsam-factors
+Section: misc
+Priority: optional
+Maintainer: Jose-Luis Blanco-Claraco <joseluisblancoc@gmail.com>
+Build-Depends: debhelper (>= 9.0.0), cmake, ros-humble-gtsam, ros-humble-mola-common, ros-humble-mrpt-libposes, ros-humble-ros-workspace
+Homepage: https://docs.mola-slam.org/
+Standards-Version: 3.9.2
+
+Package: ros-humble-mola-gtsam-factors
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ros-humble-gtsam, ros-humble-mola-common, ros-humble-mrpt-libposes, ros-humble-ros-workspace
+Description: C++ library with reusable GTSAM Factors useful in georeferencing and state-estimation MOLA modules

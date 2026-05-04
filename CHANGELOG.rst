@@ -2,6 +2,9 @@
 Changelog for package mola_georeferencing
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+2.3.1 (2026-05-04)
+------------------
+
 2.3.0 (2026-04-29)
 ------------------
 * FIX: Filter out invalid geodetic coordinates (0,0,0)

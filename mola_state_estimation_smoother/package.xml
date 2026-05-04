@@ -5,7 +5,7 @@
 -->
 <package format="3">
   <name>mola_state_estimation_smoother</name>
-  <version>2.3.0</version>
+  <version>2.3.1</version>
   <description>SE(3) pose and twist path data fusion estimator</description>
 
   <maintainer email="joseluisblancoc@gmail.com">Jose-Luis Blanco-Claraco</maintainer>
@@ -45,6 +45,19 @@
 
   <!-- Needed by the mola-cli launch files -->
   <exec_depend>mola_launcher</exec_depend>
+
+  <!-- Integration test dependencies -->
+  <test_depend>launch_testing</test_depend>
+  <test_depend>launch_testing_ament_cmake</test_depend>
+  <test_depend>launch_testing_ros</test_depend>
+  <test_depend>rclpy</test_depend>
+  <test_depend>nav_msgs</test_depend>
+  <test_depend>sensor_msgs</test_depend>
+  <test_depend>geometry_msgs</test_depend>
+  <test_depend>tf2_ros</test_depend>
+  <test_depend>mola_launcher</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>mola_bridge_ros2</test_depend>
 
   <doc_depend>doxygen</doc_depend>
 

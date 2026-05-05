@@ -144,7 +144,7 @@ void StateEstimationSmoother::initialize(const mrpt::containers::yaml& cfg)
     auto lck = mrpt::lockHelper(stateMutex_);
 
     // This also resets the GTSAM pimpl unique_ptr in state_
-    reset();
+    reset_locked();
 
     // Load params:
     params_.loadFrom(cfg["params"]);
@@ -224,9 +224,14 @@ void StateEstimationSmoother::spinOnce()
         return;
     }
 
-    auto lck = mrpt::lockHelper(stateMutex_);
+    // Read the extrapolated stamp under the lock, then release before calling estimated_navstate()
+    // to avoid recursive locking (estimated_navstate() acquires the mutex internally).
+    std::optional<mrpt::Clock::time_point> tNowOpt;
+    {
+        auto lck = mrpt::lockHelper(stateMutex_);
+        tNowOpt  = state_.get_current_extrapolated_stamp();
+    }
 
-    const auto tNowOpt = state_.get_current_extrapolated_stamp();
     if (!tNowOpt)
     {
         MRPT_LOG_THROTTLE_WARN(5.0, "Cannot publish vehicle pose (no input data yet?)");
@@ -244,7 +249,12 @@ void StateEstimationSmoother::spinOnce()
     lu.child_frame     = params_.vehicle_frame_name;
     lu.reference_frame = params_.reference_frame_name;
 
-    lu.method    = "state_estimator";
+    // Use just the YAML label part of the module instance name
+    // (e.g. "state_estimation" from "FullClassName:state_estimation"),
+    // since this string is used as a ROS topic prefix and filter key:
+    const auto& fullName = getModuleInstanceName();
+    const auto  colonPos = fullName.rfind(':');
+    lu.method    = (colonPos != std::string::npos) ? fullName.substr(colonPos + 1) : fullName;
     lu.quality   = 1;
     lu.timestamp = *tNowOpt;
     lu.pose      = nv->pose.getPoseMean().asTPose();
@@ -260,10 +270,10 @@ void StateEstimationSmoother::spinOnce()
 void StateEstimationSmoother::reset()
 {
     auto lck = mrpt::lockHelper(stateMutex_);
-
-    // reset:
-    state_ = State();
+    reset_locked();
 }
+
+void StateEstimationSmoother::reset_locked() { state_ = State(); }
 
 void StateEstimationSmoother::fuse_odometry(
     const mrpt::obs::CObservationOdometry& odom, const std::string& odomName)
@@ -293,7 +303,7 @@ void StateEstimationSmoother::fuse_odometry(
     // Use a probabilistic motion model:
     mrpt::obs::CActionRobotMovement2D odoAct;
     odoAct.motionModelConfiguration.modelSelection = mrpt::obs::CActionRobotMovement2D::mmGaussian;
-    odoAct.motionModelConfiguration.gaussianModel.minStdPHI = 1e-3;
+    odoAct.motionModelConfiguration.gaussianModel.minStdXY  = 1e-3;
     odoAct.motionModelConfiguration.gaussianModel.minStdPHI = mrpt::DEG2RAD(0.1);
 
     const auto odometryIncrement = odom.odometry - lastOdom;
@@ -318,7 +328,7 @@ void StateEstimationSmoother::fuse_odometry(
     state_.last_wheels_odometry      = odom.odometry;
 
     // Fuse this new probabilistic pose observation:
-    this->fuse_pose(odom.timestamp, newOdomPosePdf, odomName);
+    fuse_pose_locked(odom.timestamp, newOdomPosePdf, odomName);
 }
 
 void StateEstimationSmoother::fuse_imu(const mrpt::obs::CObservationIMU& imu)
@@ -326,7 +336,7 @@ void StateEstimationSmoother::fuse_imu(const mrpt::obs::CObservationIMU& imu)
     auto lck = mrpt::lockHelper(stateMutex_);
 
     // Create a new KF id (or reuse a very close match):
-    const auto this_kf_id = create_or_get_keyframe_by_timestamp(
+    const auto this_kf_id = create_or_get_keyframe_by_timestamp_locked(
         imu.timestamp, params_.imu_nearby_keyframe_stamp_tolerance);
 
     MRPT_LOG_DEBUG_FMT(
@@ -459,7 +469,7 @@ void StateEstimationSmoother::fuse_gnss(const mrpt::obs::CObservationGPS& gps)
     mrpt::topography::geodeticToENU_WGS84(geoCoords, ENU_point, *refGeoCoords);
 
     // Create a new KF id (or reuse a very close match):
-    const auto this_kf_id = create_or_get_keyframe_by_timestamp(
+    const auto this_kf_id = create_or_get_keyframe_by_timestamp_locked(
         gps.timestamp, params_.gnss_nearby_keyframe_stamp_tolerance);
 
     MRPT_LOG_DEBUG_FMT(
@@ -482,12 +492,18 @@ void StateEstimationSmoother::fuse_pose(
     const std::string& frame_id)
 {
     auto lck = mrpt::lockHelper(stateMutex_);
+    fuse_pose_locked(timestamp, pose, frame_id);
+}
 
+void StateEstimationSmoother::fuse_pose_locked(
+    const mrpt::Clock::time_point& timestamp, const mrpt::poses::CPose3DPDFGaussian& pose,
+    const std::string& frame_id)
+{
     // get this numerical frame_id :
     const auto frame_id_idx = add_or_get_odom_frame_id(frame_id);
 
     // Create a new KF id (or reuse a very close match):
-    const auto this_kf_id = create_or_get_keyframe_by_timestamp(timestamp);
+    const auto this_kf_id = create_or_get_keyframe_by_timestamp_locked(timestamp);
 
     MRPT_LOG_DEBUG_FMT(
         "[fuse_pose]: kf_idx=%zu t=%f frame='%s' (idx=%zu) p=%s sigmas=%.02e %.02e %.02e (m) %.02e "
@@ -498,16 +514,34 @@ void StateEstimationSmoother::fuse_pose(
         mrpt::RAD2DEG(std::sqrt(pose.cov(3, 3))), mrpt::RAD2DEG(std::sqrt(pose.cov(4, 4))),
         mrpt::RAD2DEG(std::sqrt(pose.cov(5, 5))));
 
-    // numerical sanity:
+    // numerical sanity: replace zero-variance entries (common in
+    // nav_msgs/Odometry messages with unfilled covariance) with a
+    // reasonable default so the factor graph remains well-conditioned.
+    auto poseSanitized = pose;
+    bool patched       = false;
     for (int i = 0; i < 6; i++)
     {
-        ASSERT_GT_(pose.cov(i, i), .0);
+        if (poseSanitized.cov(i, i) <= .0)
+        {
+            // Default sigmas: 1 m for position (i<3), 0.1 rad (~6 deg) for orientation
+            const double defaultSigma = (i < 3) ? 1.0 : 0.1;
+            poseSanitized.cov(i, i)   = defaultSigma * defaultSigma;
+            patched                   = true;
+        }
+    }
+    if (patched)
+    {
+        MRPT_LOG_THROTTLE_WARN_FMT(
+            5.0,
+            "[fuse_pose] frame='%s': zero diagonal covariance entries patched with defaults "
+            "(source may not be publishing covariance)",
+            frame_id.c_str());
     }
 
     // Add factor:
     gtsam::Pose3   pose_out;
     gtsam::Matrix6 cov_out;
-    mrpt::gtsam_wrappers::to_gtsam_se3_cov6(pose, pose_out, cov_out);
+    mrpt::gtsam_wrappers::to_gtsam_se3_cov6(poseSanitized, pose_out, cov_out);
 
     // TODO: robust factors here?
 
@@ -539,7 +573,7 @@ void StateEstimationSmoother::fuse_twist(
     gtsam::Matrix3       wCov = twistCov.asEigen().block<3, 3>(3, 3);
 
     // Create a new KF id (or reuse a very close match):
-    const auto this_kf_id = create_or_get_keyframe_by_timestamp(timestamp);
+    const auto this_kf_id = create_or_get_keyframe_by_timestamp_locked(timestamp);
 
     {
         auto                                noiseV = gtsam::noiseModel::Gaussian::Covariance(vCov);
@@ -588,13 +622,14 @@ void StateEstimationSmoother::fuse_twist(
 std::optional<NavState> StateEstimationSmoother::estimated_navstate(
     const mrpt::Clock::time_point& timestamp, const std::string& frame_id)
 {
+    auto lck = mrpt::lockHelper(stateMutex_);
+
     // 1) Make sure we processed all pending sensor data, and have updated the cached values from
     //    GTSAM values
-    process_pending_gtsam_updates();
+    process_pending_gtsam_updates_locked();
 
     // 2) Get the vehicle state from cached optimized values:
     // Look for the closest frame and extrapolate.
-    auto lck = mrpt::lockHelper(stateMutex_);
 
     std::optional<double>        closestFrameDt;
     double                       closestFrameDtSigned = 0;
@@ -729,7 +764,7 @@ void StateEstimationSmoother::onNewObservation(const CObservation::ConstPtr& o)
                 o->sensorLabel.c_str());
         }
     }
-    // Robot pose wrt "map":
+    // Robot pose wrt a reference frame (odometry or map):
     else if (auto obsPose = std::dynamic_pointer_cast<const mrpt::obs::CObservationRobotPose>(o);
              obsPose)
     {
@@ -740,7 +775,41 @@ void StateEstimationSmoother::onNewObservation(const CObservation::ConstPtr& o)
                 sensedSensorPose + mrpt::poses::CPose3DPDFGaussian(-obsPose->sensorPose);
         }
 
-        this->fuse_pose(obsPose->timestamp, sensedSensorPose, params_.reference_frame_name);
+        // Use sensorLabel as frame_id if available (e.g. "wheel_odom", "visual_odom"),
+        // so each source gets its own odometry frame in the factor graph.
+        // Falls back to reference_frame_name for backward compatibility
+        // (e.g. ground truth robot pose observations without a label).
+        std::string frameId = params_.reference_frame_name;
+        if (!obsPose->sensorLabel.empty())
+        {
+            // Normalize: replace illegal chars (keep alphanumeric, '_', '-', '/')
+            std::string normalized;
+            normalized.reserve(obsPose->sensorLabel.size());
+            for (char c : obsPose->sensorLabel)
+                normalized += (std::isalnum(static_cast<unsigned char>(c)) || c == '_' ||
+                               c == '-' || c == '/')
+                                  ? c
+                                  : '_';
+
+            // Enforce max length
+            constexpr std::size_t MAX_FRAME_ID_LEN = 64;
+            if (normalized.size() > MAX_FRAME_ID_LEN) normalized.resize(MAX_FRAME_ID_LEN);
+
+            // Reject reserved names
+            if (normalized == params_.vehicle_frame_name || normalized == params_.enu_frame_name)
+            {
+                MRPT_LOG_WARN_FMT(
+                    "CObservationRobotPose sensorLabel '%s' is a reserved frame name; "
+                    "falling back to reference_frame_name '%s'",
+                    obsPose->sensorLabel.c_str(), params_.reference_frame_name.c_str());
+            }
+            else
+            {
+                frameId = normalized;
+            }
+        }
+
+        this->fuse_pose(obsPose->timestamp, sensedSensorPose, frameId);
     }
     // GNSS source:
     else if (auto obsGPS = std::dynamic_pointer_cast<const mrpt::obs::CObservationGPS>(o); obsGPS)
@@ -943,9 +1012,15 @@ void StateEstimationSmoother::delete_too_old_entries()
 StateEstimationSmoother::frame_index_t StateEstimationSmoother::create_or_get_keyframe_by_timestamp(
     const mrpt::Clock::time_point& t, const std::optional<double>& overrideCloseEnough)
 {
-    const auto tle = mola::ProfilerEntry(profiler_, "create_or_get_keyframe_by_timestamp");
-
     auto lck = mrpt::lockHelper(stateMutex_);
+    return create_or_get_keyframe_by_timestamp_locked(t, overrideCloseEnough);
+}
+
+StateEstimationSmoother::frame_index_t
+    StateEstimationSmoother::create_or_get_keyframe_by_timestamp_locked(
+        const mrpt::Clock::time_point& t, const std::optional<double>& overrideCloseEnough)
+{
+    const auto tle = mola::ProfilerEntry(profiler_, "create_or_get_keyframe_by_timestamp");
 
     const double threshold = overrideCloseEnough ? *overrideCloseEnough
                                                  : params_.min_time_difference_to_create_new_frame;
@@ -1055,9 +1130,13 @@ StateEstimationSmoother::odometry_frameid_t StateEstimationSmoother::add_or_get_
 
 void StateEstimationSmoother::process_pending_gtsam_updates()
 {
-    const auto tle = mola::ProfilerEntry(profiler_, "process_pending_gtsam_updates");
-
     auto lck = mrpt::lockHelper(stateMutex_);
+    process_pending_gtsam_updates_locked();
+}
+
+void StateEstimationSmoother::process_pending_gtsam_updates_locked()
+{
+    const auto tle = mola::ProfilerEntry(profiler_, "process_pending_gtsam_updates");
 
     // Even if we have no new factors/values, do update the stamps of "persistent" variables:
     if (state_.last_observation_stamp.has_value())
@@ -1433,8 +1512,9 @@ void StateEstimationSmoother::initialize_new_frame(
     if (params_.enforce_planar_motion)
     {
         const auto planar_z_noise = gtsam::noiseModel::Diagonal::Sigmas(gtsam::Vector6(
-            PLANAR_XY_SIGMA, PLANAR_XY_SIGMA, PLANAR_XY_SIGMA, PLANAR_XY_SIGMA, PLANAR_XY_SIGMA,
-            PLANAR_Z_SIGMA));
+            PLANAR_Z_SIGMA, PLANAR_Z_SIGMA, PLANAR_XY_SIGMA,  // rx≈0, ry≈0, rz free
+            PLANAR_XY_SIGMA, PLANAR_XY_SIGMA, PLANAR_Z_SIGMA)  // tx free, ty free, tz≈0
+        );
 
         state_.gtsam->newFactors.addPrior(T(id), gtsam::Pose3::Identity(), planar_z_noise);
     }
@@ -1530,7 +1610,13 @@ std::optional<mrpt::poses::CPose3DPDFGaussian> StateEstimationSmoother::estimate
     const
 {
     auto lck = mrpt::lockHelper(stateMutex_);
+    return estimated_T_enu_to_map_locked();
+}
 
+std::optional<mrpt::poses::CPose3DPDFGaussian>
+    StateEstimationSmoother::estimated_T_enu_to_map_locked() const
+{
+    // Called with stateMutex_ already held by the caller.
     auto it = state_.last_estimated_frames.find(REFERENCE_FRAME_ID);
     if (it == state_.last_estimated_frames.end())
     {
@@ -1543,8 +1629,7 @@ std::optional<mrpt::poses::CPose3DPDFGaussian>
     StateEstimationSmoother::get_estimated_T_map_to_odometry_frame(const frame_index_t idx) const
 {
     ASSERT_GE_(idx, 1);
-    auto lck = mrpt::lockHelper(stateMutex_);
-
+    // Called with stateMutex_ already held by the caller.
     auto it = state_.last_estimated_frames.find(idx);
     if (it == state_.last_estimated_frames.end())
     {
@@ -1621,7 +1706,7 @@ void StateEstimationSmoother::publishEstimatedGeoreferencing()
         return;
     }
 
-    auto T_enu_map_opt = estimated_T_enu_to_map();
+    auto T_enu_map_opt = estimated_T_enu_to_map_locked();
     if (!T_enu_map_opt.has_value())
     {
         return;

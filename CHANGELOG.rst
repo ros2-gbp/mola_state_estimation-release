@@ -2,6 +2,19 @@
 Changelog for package mola_state_estimation
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+2.4.0 (2026-05-11)
+------------------
+* Merge pull request `#30 <https://github.com/MOLAorg/mola_state_estimation/issues/30>`_ from MOLAorg/bump-cmake-version
+  bump min req cmake version to 3.22
+* bump min req cmake version to 3.22
+* Contributors: Jose Luis Blanco-Claraco
+
+2.3.1 (2026-05-04)
+------------------
+
+2.3.0 (2026-04-29)
+------------------
+
 2.2.0 (2026-03-03)
 ------------------
 

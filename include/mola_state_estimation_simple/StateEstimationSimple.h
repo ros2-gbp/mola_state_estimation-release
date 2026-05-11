@@ -21,8 +21,8 @@
 #pragma once
 
 // This package
+#include <mola_kernel/utils/RegexCache.h>
 #include <mola_state_estimation_simple/Parameters.h>
-#include <mola_state_estimation_simple/RegexCache.h>
 
 // MOLA
 #include <mola_kernel/interfaces/NavStateFilter.h>
@@ -39,7 +39,7 @@
 
 namespace mola::state_estimation_simple
 {
-/** Fuse of odometry, IMU, and SE(3) pose/twist estimations.
+/** Simple motion-model state estimator fusing odometry, IMU, and SE(3) pose/twist.
  *
  * Usage:
  * - (1) Call initialize() or set the required parameters directly in params_.
@@ -50,13 +50,24 @@ namespace mola::state_estimation_simple
  * - (4) Read the estimation up to any nearby moment in time with
  *       estimated_navstate()
  *
- * Old observations are automatically removed.
+ * ## Prior covariance model (estimated_navstate)
+ *
+ * Given `dt` seconds elapsed since the last `fuse_pose()` call, the returned
+ * prior pose covariance diagonal is:
+ *
+ *   cov_xyz = sigma_relative_pose_linear^2
+ *           + (sigma_random_walk_acceleration_linear * dt)^2
+ *
+ *   cov_rot = sigma_relative_pose_angular^2
+ *           + (sigma_random_walk_acceleration_angular * dt)^2
+ *
+ * `sigma_relative_pose_linear` [m] is a dt-independent floor on position
+ * uncertainty and is the primary knob for tightening the ICP prior.
+ * `sigma_random_walk_acceleration_linear` [m/s^2] adds time-growing
+ * uncertainty due to unmodeled accelerations.
  *
  * \note This implementation of mola::NavStateFilter ignores the passed
- *       "frame_id".
- * \note It also ignore GNSS sensor.
- *
- * \sa mola::IMUIntegrator
+ *       "frame_id" and GNSS observations.
  *
  * \ingroup mola_state_estimation_grp
  */
@@ -139,11 +150,33 @@ class StateEstimationSimple : public mola::NavStateFilter
         std::optional<mrpt::math::CMatrixDouble66>     last_twist_cov;
         bool                                           pose_already_updated_with_odom = false;
 
+        // Per-source bookkeeping used by fuse_pose() to compute velocity from
+        // consecutive poses of the SAME source (LiDAR ICP), independently of
+        // whether odometry has since modified last_pose. Without this, fuse_pose()
+        // would compute incrPose = ICP_result - (ICP_prev + odom_accumulated),
+        // i.e. the odometry residual, rather than the true robot velocity.
+        //
+        // Also used by fuse_odometry_3d_pose() for 3D odometry deltas.
+        struct SourceState
+        {
+            std::optional<mrpt::poses::CPose3DPDFGaussian> last_pose;
+            std::optional<mrpt::Clock::time_point>         last_obs_tim;
+        };
+        std::map<std::string, SourceState> per_source;
+
         // To be built from parameters strings when changed.
         RegexCache do_process_imu_labels_re;
         RegexCache do_process_odometry_labels_re;
         RegexCache do_process_gnss_labels_re;
     };
+
+    // Integrates a CObservationRobotPose that comes from an odometry source
+    // (e.g. wheel encoders forwarded as 3D pose). Unlike fuse_pose(), this
+    // applies an incremental delta to last_pose (keeping it in the LiDAR SLAM
+    // frame) and does NOT update last_pose_obs_tim, so it never interferes with
+    // the LiDAR ICP timestamp used for dt validation and pose extrapolation.
+    void fuse_odometry_3d_pose(
+        const mrpt::obs::CObservationRobotPose& obs, const std::string& odomName);
 
     State                        state_;
     mutable std::recursive_mutex state_mtx_;

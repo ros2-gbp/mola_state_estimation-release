@@ -1,0 +1,12 @@
+Source: ros-lyrical-mola-state-estimation-smoother
+Section: misc
+Priority: optional
+Maintainer: "Jose-Luis Blanco-Claraco" <joseluisblancoc@gmail.com>
+Build-Depends: debhelper (>= 9.0.0), cmake, libboost-chrono-dev, libboost-date-time-dev, libboost-filesystem-dev, libboost-program-options-dev, libboost-regex-dev, libboost-serialization-dev, libboost-system-dev, libboost-thread-dev, libboost-timer-dev, ros-lyrical-ament-cmake, ros-lyrical-ament-cmake-gtest, ros-lyrical-ament-cmake-pytest <!nocheck>, ros-lyrical-ament-cmake-xmllint, ros-lyrical-geometry-msgs <!nocheck>, ros-lyrical-gtsam, ros-lyrical-launch-testing <!nocheck>, ros-lyrical-launch-testing-ament-cmake <!nocheck>, ros-lyrical-launch-testing-ros <!nocheck>, ros-lyrical-mola-bridge-ros2 <!nocheck>, ros-lyrical-mola-common, ros-lyrical-mola-gtsam-factors, ros-lyrical-mola-imu-preintegration, ros-lyrical-mola-kernel, ros-lyrical-mola-launcher <!nocheck>, ros-lyrical-mrpt-libobs, ros-lyrical-nav-msgs <!nocheck>, ros-lyrical-rclpy <!nocheck>, ros-lyrical-ros-environment, ros-lyrical-sensor-msgs <!nocheck>, ros-lyrical-tf2-ros <!nocheck>, ros-lyrical-ros-workspace
+Homepage: https://github.com/MOLAorg/mola_state_estimation
+Standards-Version: 3.9.2
+
+Package: ros-lyrical-mola-state-estimation-smoother
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ros-lyrical-gtsam, ros-lyrical-mola-common, ros-lyrical-mola-gtsam-factors, ros-lyrical-mola-imu-preintegration, ros-lyrical-mola-kernel, ros-lyrical-mola-launcher, ros-lyrical-mrpt-libobs, ros-lyrical-ros-workspace
+Description: SE(3) pose and twist path data fusion estimator

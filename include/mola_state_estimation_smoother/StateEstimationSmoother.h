@@ -27,9 +27,9 @@
 #include <mola_kernel/interfaces/NavStateFilter.h>
 #include <mola_kernel/interfaces/RawDataSourceBase.h>
 #include <mola_kernel/interfaces/VizInterface.h>
+#include <mola_kernel/utils/RegexCache.h>
 #include <mola_kernel/version.h>
 #include <mola_state_estimation_smoother/Parameters.h>
-#include <mola_state_estimation_smoother/RegexCache.h>
 
 // MOLA:
 #include <mola_imu_preintegration/ImuIntegrator.h>
@@ -235,6 +235,9 @@ class StateEstimationSmoother : public mola::NavStateFilter,
         /// A bimap of known odometry "frame_id" <=> "numeric IDs":
         mrpt::containers::bimap<std::string, odometry_frameid_t> known_odom_frames;
 
+        /// Monotonic counter for odometry frame IDs; avoids collisions if entries are ever removed.
+        odometry_frameid_t next_odom_frame_id = 1;
+
         /// The latest values from the estimator; updated in process_pending_gtsam_updates()
         std::map<frame_index_t, FrameState> last_estimated_states;
 
@@ -286,6 +289,7 @@ class StateEstimationSmoother : public mola::NavStateFilter,
 
     State      state_;
     std::mutex stateMutex_;
+    bool       params_loaded_ = false;
 
     /// Creates a new frame index for timestamp t, or returns the existing one if close enough.
     /// This also is in charge of the complex task of finding nearby existing frames and adding the
@@ -299,6 +303,7 @@ class StateEstimationSmoother : public mola::NavStateFilter,
 
     // ---- _locked variants: assume stateMutex_ is already held by the caller ----
     void reset_locked();
+    void reinitialize_gtsam_locked();
     void fuse_pose_locked(
         const mrpt::Clock::time_point& timestamp, const mrpt::poses::CPose3DPDFGaussian& pose,
         const std::string& frame_id);

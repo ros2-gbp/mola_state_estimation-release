@@ -1,0 +1,138 @@
+# Based on GTSAM file (by @ProfFan)
+name: CI Build colcon
+
+on: [push]
+
+jobs:
+  build_docker: # On Linux, iterates on all ROS 1 and ROS 2 distributions.
+    runs-on: ubuntu-latest
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    strategy:
+      matrix:
+        # Define the Docker image(s) associated with each ROS distribution.
+        # The include syntax allows additional variables to be defined, like
+        # docker_image in this case. See documentation:
+        # https://help.github.com/en/actions/reference/workflow-syntax-for-github-actions#example-including-configurations-in-a-matrix-build
+        #
+        # Platforms are defined in REP 3 and REP 2000:
+        # https://ros.org/reps/rep-0003.html
+        # https://ros.org/reps/rep-2000.html
+        include:
+          # Humble Hawksbill (May 2022 - May 2027)
+          #- docker_image: ubuntu:jammy
+          #  ros_distribution: humble
+          #  use_ros_testing: false
+
+          - docker_image: ubuntu:jammy
+            ros_distribution: humble
+            use_ros_testing: true
+
+          # Jazzy (2024 - ??)
+          #- docker_image: ubuntu:noble
+          #  ros_distribution: jazzy
+          #  use_ros_testing: false
+
+          - docker_image: ubuntu:noble
+            ros_distribution: jazzy
+            use_ros_testing: true
+
+          # Rolling Ridley (No End-Of-Life)
+          #- docker_image: ubuntu:noble
+          #  ros_distribution: rolling
+          #  use_ros_testing: false
+
+          - docker_image: ubuntu:noble
+            ros_distribution: rolling
+            use_ros_testing: true
+
+          - docker_image: ubuntu:noble
+            ros_distribution: rolling
+            use_ros2-testing: true
+            coverage_run: true
+
+    container:
+      image: ${{ matrix.docker_image }}
+
+    steps:
+      - name: Checkout
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          apt-get -y update
+          apt-get -y install git
+          git clone https://$TOKEN@github.com/$GITHUB_REPOSITORY.git --recursive "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git checkout $GITHUB_SHA
+          git submodule update --init --recursive
+
+      - name: setup ROS environment
+        uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: ${{ matrix.ros_distribution }}
+          use-ros2-testing: ${{ matrix.use_ros_testing }}
+
+      - name: Install rosdep dependencies
+        run: |
+          . /opt/ros/*/setup.sh
+          rosdep update
+          rosdep install --from-paths . --ignore-src -r -y
+
+      - name: Install lcov for coverage analysis
+        if: matrix.coverage_run == true
+        run: |
+          apt-get update
+          apt-get install -y lcov
+
+      - name: Build with colcon
+        run: |
+          . /opt/ros/*/setup.sh
+          env
+
+          # Inject Coverage Build Type
+          if [ "${{ matrix.coverage_run }}" = "true" ]; then
+            echo "Enabling Coverage build type..."
+            # This flag forces the use of the gcov flags defined in CMakeLists.txt
+            EXTRA_CMAKE_ARGS="$EXTRA_CMAKE_ARGS -DCMAKE_BUILD_TYPE=Coverage"
+          fi
+
+          env
+          MAKEFLAGS="-j2" colcon build \
+            --symlink-install \
+            --parallel-workers 2 \
+            --event-handlers console_direct+ \
+            --cmake-args $EXTRA_CMAKE_ARGS
+
+      - name: Run unit tests
+        run: |
+          . /opt/ros/*/setup.sh
+          # Run tests regardless of coverage setting, as they are required to generate the .gcda files
+          colcon test --event-handlers console_direct+
+          colcon test-result --verbose
+
+      - name: Generate coverage report
+        if: matrix.coverage_run == true
+        run: |
+          # 1. Capture coverage data across the entire workspace.
+          #    --ignore-errors mismatch fixes geninfo parsing errors
+          #    --rc geninfo_unexecuted_blocks=1 fixes warnings about unexecuted blocks
+          lcov --capture --directory . --output-file coverage.info \
+            --ignore-errors mismatch --rc geninfo_unexecuted_blocks=1
+
+          # 2. Filter the report: Remove all files outside of your source code
+          lcov --remove coverage.info '/opt/ros/*' '/usr/*' \
+            --ignore-errors unused --output-file coverage_filtered.info
+
+          # 3. Print a summary to the log
+          echo "--- Coverage Summary for mola-state-estimation ---"
+          lcov --list coverage_filtered.info
+          echo "------------------------------------------"
+
+      - name: Upload coverage to Codecov
+        if: matrix.coverage_run == true
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage_filtered.info
+          slug: MOLAorg/mola_state_estimation
+          flags: colcon,rolling,gcc

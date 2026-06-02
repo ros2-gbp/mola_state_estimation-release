@@ -8,7 +8,7 @@
 # ------------------------------------------------------------------------------
 
 # Minimum CMake version: limited by CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.22...3.31)  # Ubuntu 22.04+
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(default_build_type "Release")
@@ -52,12 +52,12 @@ mola_add_library(
     include/mola_georeferencing/simplemap_georeference.h
   PUBLIC_LINK_LIBRARIES
     gtsam
-    mola::mola_gtsam_factors
-    mola::mola_yaml
     mola::mp2p_icp
     mrpt::maps
-#	PRIVATE_LINK_LIBRARIES
+  PRIVATE_LINK_LIBRARIES
+    mola::mola_gtsam_factors
   CMAKE_DEPENDENCIES
+    GTSAM
     mp2p_icp
     mrpt-maps
 

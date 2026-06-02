@@ -2,6 +2,9 @@
 Changelog for package mola_state_estimation_smoother
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+2.4.1 (2026-06-02)
+------------------
+
 2.4.0 (2026-05-11)
 ------------------
 * FIX: reset() should reinitialize gtsam

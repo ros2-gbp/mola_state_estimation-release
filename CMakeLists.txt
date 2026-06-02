@@ -7,8 +7,9 @@
 # Released under GNU GPL v3. See LICENSE file
 # ------------------------------------------------------------------------------
 
-# Minimum CMake vesion: limited by CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS
-cmake_minimum_required(VERSION 3.5)
+# Rolled-back to support ROS2 Humble (FindPythonInterp.cmake)
+#cmake_minimum_required(VERSION 3.22...3.31)  # Ubuntu 22.04+
+cmake_minimum_required(VERSION 3.10)
 
 if("$ENV{ROS_VERSION}" STREQUAL "2")
     set(DETECTED_ROS2 TRUE)
@@ -98,10 +99,23 @@ if(DETECTED_ROS2)
   # find dependencies
   find_package(ament_cmake REQUIRED)
 
+  # Install integration-test data files so tests can locate them via ament_index
+  install(
+    DIRECTORY test/integration/data
+    DESTINATION share/${PROJECT_NAME}/test/integration/
+  )
+
   if(BUILD_TESTING)
     find_package(ament_cmake_gtest REQUIRED)
+    find_package(ament_cmake_pytest REQUIRED)
+    find_package(launch_testing_ament_cmake REQUIRED)
 
     add_subdirectory(tests)
+
+    add_launch_test(test/integration/test_static_convergence.py
+      TIMEOUT 90)
+    add_launch_test(test/integration/test_moving_georef.py
+      TIMEOUT 180)
   endif()
 
   ament_package()

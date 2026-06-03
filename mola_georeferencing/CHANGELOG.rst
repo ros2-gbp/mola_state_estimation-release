@@ -2,6 +2,9 @@
 Changelog for package mola_georeferencing
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+2.4.2 (2026-06-04)
+------------------
+
 2.4.1 (2026-06-02)
 ------------------
 * cmake: remove mola_yaml as dep, added GTSAM as public dep

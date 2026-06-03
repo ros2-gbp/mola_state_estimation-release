@@ -1,3 +1,31 @@
+## mola_state_estimation (jazzy) - 2.4.2-1
+
+The packages in the `mola_state_estimation` repository were released into the `jazzy` distro by running `/home/jlblanco/ros2_ws/bloom-venv/bin/bloom-release -y -r jazzy mola_state_estimation` on `Wed, 03 Jun 2026 23:07:09 -0000`
+
+These packages were released:
+- `mola_georeferencing`
+- `mola_gtsam_factors`
+- `mola_state_estimation`
+- `mola_state_estimation_simple`
+- `mola_state_estimation_smoother`
+
+Version of package(s) in repository `mola_state_estimation`:
+
+- upstream repository: https://github.com/MOLAorg/mola_state_estimation.git
+- release repository: https://github.com/ros2-gbp/mola_state_estimation-release.git
+- rosdistro version: `2.4.0-1`
+- old version: `2.4.1-1`
+- new version: `2.4.2-1`
+
+Versions of tools used:
+
+- bloom version: `0.14.3`
+- catkin_pkg version: `1.1.0`
+- rosdep version: `0.26.0`
+- rosdistro version: `1.0.1`
+- vcstools version: `0.1.42`
+
+
 ## mola_state_estimation (humble) - 2.4.2-1
 
 The packages in the `mola_state_estimation` repository were released into the `humble` distro by running `/home/jlblanco/ros2_ws/bloom-venv/bin/bloom-release -y -r humble mola_state_estimation` on `Wed, 03 Jun 2026 23:04:49 -0000`

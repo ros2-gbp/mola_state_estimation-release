@@ -35,7 +35,7 @@ project(mola_gtsam_factors LANGUAGES CXX)
 # MOLA CMake scripts: "mola_xxx()"
 find_package(mola_common REQUIRED)
 find_package(GTSAM REQUIRED)
-find_package(mrpt-poses REQUIRED)
+find_package(mrpt_poses REQUIRED)
 
 # -----------------------
 # define lib:
@@ -51,6 +51,8 @@ mola_add_library(
     include/mola_gtsam_factors/FactorTricycleKinematic.h
     include/mola_gtsam_factors/gtsam_detect_version.h
     include/mola_gtsam_factors/id.h
+    include/mola_gtsam_factors/imu_helpers.h
+    include/mola_gtsam_factors/MapGravityFactor.h
     include/mola_gtsam_factors/MeasuredGravityFactor.h
     include/mola_gtsam_factors/Pose3RotationFactor.h
     src/FactorAngularVelocityIntegration.cpp
@@ -59,21 +61,23 @@ mola_add_library(
     src/FactorGnssMapEnu.cpp
     src/FactorTrapezoidalIntegrator.cpp
     src/FactorTricycleKinematic.cpp
+    src/imu_helpers.cpp
+    src/MapGravityFactor.cpp
     src/MeasuredGravityFactor.cpp
     src/Pose3RotationFactor.cpp
     src/register.cpp
   PUBLIC_LINK_LIBRARIES
     gtsam
-    mrpt::poses
+    mrpt::mrpt_poses
   #PRIVATE_LINK_LIBRARIES
   CMAKE_DEPENDENCIES
-    mrpt-poses
+    mrpt_poses
 )
 
 # -----------------------
 # define tests:
-#enable_testing()
-#add_subdirectory(module/tests)
+enable_testing()
+add_subdirectory(tests)
 
 # -----------------------------------------------------------------------------
 #  ROS2

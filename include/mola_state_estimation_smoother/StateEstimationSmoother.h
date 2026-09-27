@@ -41,17 +41,29 @@
 #include <mrpt/obs/CObservationGPS.h>
 #include <mrpt/obs/CObservationIMU.h>
 #include <mrpt/obs/CObservationOdometry.h>
+#include <mrpt/poses/CPose3DInterpolator.h>
 #include <mrpt/poses/CPose3DPDFGaussian.h>
 #include <mrpt/system/COutputLogger.h>
 #include <mrpt/system/CTimeLogger.h>
 
 // std:
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
+#include <thread>
+#include <utility>
 
 namespace mola::state_estimation_smoother
 {
+// Defined in src/, kept out of the public API (used only via pointer here):
+struct Snapshot;
+class FastPredictor;
+
 /** Sliding window Factor-graph data fusion for odometry, IMU, GNSS, and SE(3)
  * pose/twist estimations.
  *
@@ -124,7 +136,8 @@ class StateEstimationSmoother : public mola::NavStateFilter,
     StateEstimationSmoother(StateEstimationSmoother&&)                 = delete;
     StateEstimationSmoother& operator=(const StateEstimationSmoother&) = delete;
     StateEstimationSmoother& operator=(StateEstimationSmoother&&)      = delete;
-    ~StateEstimationSmoother()                                         = default;
+    // Out-of-line: fastPredictor_ is a unique_ptr to an incomplete type here.
+    ~StateEstimationSmoother();
 
     /** \name Main API
      *  @{ */
@@ -164,6 +177,21 @@ class StateEstimationSmoother : public mola::NavStateFilter,
     /** Integrates new GNSS observations into the estimator */
     void fuse_gnss(const mrpt::obs::CObservationGPS& gps) override;
 
+    /** Anchors T_enu_to_map to a known, fixed value (equivalent to setting
+     *  the `fixed_geo_reference` YAML parameter, but at runtime): used by
+     *  localization front-ends (e.g. mola_lidar_odometry) once they load a
+     *  geo-referenced map, so GNSS fixes constrain the vehicle's position in
+     *  that map's frame without the estimator also trying to solve for
+     *  T_enu_to_map itself (that combination leaves T_enu_to_map and every
+     *  fused Pose3RotationFactor/MeasuredGravityFactor-derived orientation
+     *  jointly underconstrained, since only their *relative* rotation is
+     *  ever measured). Re-initializes the smoother's factor graph, so it
+     *  should be called before any run-relevant sensor fusion, not mid-run.
+     */
+#if defined(MOLA_KERNEL_NAVSTATE_FILTER_HAS_GEO_REFERENCE)
+    void set_geo_reference(const mola::Georeferencing& georef) override;
+#endif
+
     /** Integrates new twist estimation (in the odom frame) */
     void fuse_twist(
         const mrpt::Clock::time_point& timestamp, const mrpt::math::TTwist3D& twist,
@@ -176,6 +204,23 @@ class StateEstimationSmoother : public mola::NavStateFilter,
      */
     [[nodiscard]] std::optional<NavState> estimated_navstate(
         const mrpt::Clock::time_point& timestamp, const std::string& frame_id) override;
+
+    /** Implements NavStateFilter::estimated_trajectory().
+     *
+     *  Returns the smoothed trajectory: each keyframe's pose as it was when it
+     *  left the sliding window, i.e. after every measurement the window could
+     *  bring to bear on it, plus the keyframes still inside the window at their
+     *  current value. This is a different quantity from estimated_navstate(),
+     *  which anchors on the newest keyframe and extrapolates: the newest state
+     *  is the least optimized one, the oldest is the most.
+     *
+     *  Requires `keep_finalized_trajectory` (off by default). An odometry
+     *  frame is served through the latest estimate of that frame's transform,
+     *  held constant over the trajectory.
+     */
+    [[nodiscard]] std::optional<mrpt::poses::CPose3DInterpolator> estimated_trajectory(
+        const mrpt::Clock::time_point& start_time, const mrpt::Clock::time_point& end_time,
+        const std::string& frame_id) override;
 
     /// Returns a list of known odometry frame_ids:
     [[nodiscard]] auto known_odometry_frame_ids() -> std::set<std::string>;
@@ -196,6 +241,26 @@ class StateEstimationSmoother : public mola::NavStateFilter,
 
     /// Returns the current georeferencing, if available
     [[nodiscard]] std::optional<mola::Georeferencing> current_georeferencing() const;
+
+    /** Number of constant-velocity kinematic factors currently live in the
+     *  underlying factor graph (2 per kinematic link).
+     *
+     *  For tests only. It counts the real GTSAM graph rather than this class's own
+     *  link bookkeeping, so that a test can tell whether a factor removal actually
+     *  reached the solver. Returns a plain count so GTSAM stays out of this header.
+     */
+    [[nodiscard]] size_t count_const_vel_factors_for_testing() const;
+
+    /** Identifies each constant-velocity kinematic link currently live in the
+     *  underlying factor graph by its endpoint timestamps, one entry per link
+     *  (not per factor: each link emits two factors, linear and angular).
+     *
+     *  For tests only, to check the graph topology survives a splice as expected
+     *  (e.g. that the direct a->b link was replaced by a->n and n->b, not left
+     *  alongside them).
+     */
+    [[nodiscard]] std::set<std::pair<mrpt::Clock::time_point, mrpt::Clock::time_point>>
+        const_vel_factor_links_for_testing() const;
 
     /** @} */
 
@@ -220,6 +285,11 @@ class StateEstimationSmoother : public mola::NavStateFilter,
     };
 
     // Accesses to this struct values in state_ must be protected by stateMutex_
+    /// Decimates IMU readings to one per imu_min_sample_period. Defined in the
+    /// .cpp only, so this header's layout does not depend on the version of
+    /// mola_imu_preintegration it is compiled against.
+    struct ImuDecimator;
+
     struct State
     {
         State();
@@ -241,8 +311,52 @@ class StateEstimationSmoother : public mola::NavStateFilter,
         /// The latest values from the estimator; updated in process_pending_gtsam_updates()
         std::map<frame_index_t, FrameState> last_estimated_states;
 
+        /// Low-pass-filtered twist of the newest keyframe, used as the
+        /// extrapolation velocity for short-term prediction when
+        /// `predict_twist_filter_enabled`. Damps the boundary keyframe's raw
+        /// velocity (the least-constrained node), which otherwise injects jitter
+        /// into a front end's motion prior. Reset with the rest of `State`.
+        std::optional<mrpt::math::TTwist3D>    filtered_predict_twist;
+        std::optional<mrpt::Clock::time_point> filtered_predict_twist_stamp;
+
         /// The latest values from the estimator; updated in process_pending_gtsam_updates()
         std::map<odometry_frameid_t, mrpt::poses::CPose3DPDFGaussian> last_estimated_frames;
+
+        /// The last raw pose received from each odometry source, expressed in
+        /// that source's OWN frame {odom_i} (NOT in {map}), with its timestamp.
+        /// `estimated_navstate(t, {odom_i})` extrapolates from this anchor so the
+        /// short-term prediction stays continuous in the front end's own frame,
+        /// instead of reconstructing it globally as X(kf) (-) T_map_to_odom_i
+        /// (which would leak {map} corrections -- geo-ref / loop closure /
+        /// per-solve jitter -- into the prediction; here the fixed-lag window
+        /// keeps that leak small, but anchoring on the raw pose removes it).
+        struct RawSourcePose
+        {
+            mrpt::Clock::time_point         stamp;
+            mrpt::poses::CPose3DPDFGaussian pose;  //!< in {odom_i}
+        };
+        std::map<odometry_frameid_t, RawSourcePose> last_raw_pose_by_source;
+
+        /// Per-source bookkeeping for the relative-factor formulation of
+        /// fuse_pose() (see Parameters::relative_factors_frame_ids_re): the
+        /// keyframe carrying that source's one absolute anchor factor, and the
+        /// tail of its chain of increment factors.
+        struct RelativePoseChain
+        {
+            std::optional<frame_index_t>                   anchor_kf;
+            std::optional<frame_index_t>                   last_kf;
+            std::optional<mrpt::poses::CPose3DPDFGaussian> last_pose_in_odom;
+
+            /// Timestamp of the last accepted sample: readings not strictly
+            /// newer are dropped, since the chain tail is what the next
+            /// increment is measured from.
+            std::optional<mrpt::Clock::time_point> last_stamp;
+        };
+        std::map<odometry_frameid_t, RelativePoseChain> relative_pose_chains;
+
+        /// Per fuse_pose() source, the timestamp of the last reading that was
+        /// allowed through, for Parameters::pose_min_sample_period.
+        std::map<odometry_frameid_t, mrpt::Clock::time_point> last_kept_pose_stamp;
 
         /** For real-time mode operation (not offline): returns the current extrapolated stamp,
          *  by adding the difference between the last observation wallclock time and now to the
@@ -266,6 +380,42 @@ class StateEstimationSmoother : public mola::NavStateFilter,
         std::optional<mrpt::poses::CPose2D> last_wheels_odometry;
         std::optional<std::string>          last_wheels_odometry_name;
 
+        /// Stamp of the last wheel-odometry reading that was actually KEPT
+        /// (turned into a keyframe/factor). Used by odometry_min_sample_period
+        /// to merge higher-rate readings: while a reading arrives within that
+        /// period of this stamp it is dropped without advancing the pose anchor
+        /// (last_wheels_odometry), so the next kept reading fuses the whole
+        /// accumulated increment.
+        std::optional<mrpt::Clock::time_point> last_wheels_odometry_stamp;
+
+        /// Absolute dead-reckoned wheel-odometry pose in its own {odom_i}
+        /// frame, with the uncertainty accumulated over the whole history, for
+        /// the one factor resolving T_map_to_odom_i and for the source's
+        /// own-frame pose estimated_navstate() extrapolates from. The pose is
+        /// the same one the source reports, and the covariance is the composed
+        /// motion-model covariance of every increment since the first reading.
+        /// Reset with the estimator.
+        std::optional<mrpt::poses::CPose3DPDFGaussian> wheels_odometry_accumulated;
+
+        /// Tail keyframe of the wheel-odometry relative-factor chain. Reset
+        /// with the estimator.
+        std::optional<frame_index_t> last_wheels_odometry_kf;
+
+        /// Odometry reading representing last_wheels_odometry_kf: the first
+        /// one that landed on it. The next increment factor starts here, so
+        /// later readings on the same keyframe lose no motion.
+        std::optional<mrpt::poses::CPose2D> last_wheels_odometry_at_kf;
+
+        /// Keyframe carrying the single absolute pose-in-{odom_i} factor that
+        /// resolves T_map_to_odom_i for wheel odometry. Set once
+        /// and never renewed: the fixed-lag smoother marginalizes keyframes
+        /// rather than dropping their factors, so that information survives its
+        /// own keyframe. See fuse_odometry_relative_locked().
+        std::optional<frame_index_t> wheels_odometry_anchor_kf;
+
+        /// Created on first use. See ImuDecimator.
+        std::shared_ptr<ImuDecimator> imu_decimator;
+
         /** Refer to Parameters for possible sources of this.
          * Anyways: this will always hold either the estimated or the fixed (externally set)
          * georeferencing parameters.
@@ -285,11 +435,53 @@ class StateEstimationSmoother : public mola::NavStateFilter,
         RegexCache do_process_imu_labels_re;
         RegexCache do_process_odometry_labels_re;
         RegexCache do_process_gnss_labels_re;
+        RegexCache relative_factors_frame_ids_re;
     };
 
     State      state_;
     std::mutex stateMutex_;
-    bool       params_loaded_ = false;
+
+    /// Poses of the keyframes already marginalized out, in the reference frame,
+    /// each recorded at the moment it left the window. Only filled when
+    /// `keep_finalized_trajectory` is set. Kept outside State so that a reset
+    /// of the factor graph does not discard the history already collected.
+    mrpt::poses::CPose3DInterpolator finalizedTrajectory_;
+    bool                             params_loaded_ = false;
+
+    /// Lock-free read model for async_backend mode. Populated at the end of each
+    /// solve; queried by estimated_navstate()/spinOnce() without stateMutex_.
+    std::unique_ptr<FastPredictor> fastPredictor_;
+
+    /// Builds an immutable Snapshot of the current solution (newest keyframe
+    /// anchor + frame transforms + georef). Assumes stateMutex_ is held.
+    /// Returns nullptr if there is no keyframe/state to snapshot yet.
+    [[nodiscard]] std::shared_ptr<const Snapshot> build_snapshot_locked() const;
+
+    // ---- async backend (only used when params_.async_backend) ----
+    std::thread                                                           backendThread_;
+    std::mutex                                                            queueMutex_;
+    std::condition_variable                                               queueCv_;
+    std::deque<std::pair<mrpt::Clock::time_point, std::function<void()>>> ingestQueue_;
+    std::atomic<bool>                                                     backendStop_{false};
+    bool                                                                  backendRunning_ = false;
+
+    /// Bumped by reset_locked() so a batch already detached by backend_loop()
+    /// (pre-reset) is discarded instead of repopulating the fresh graph with
+    /// stale measurements (e.g. across set_geo_reference()).
+    std::atomic<uint64_t> resetEpoch_{0};
+
+    /// Appends a work item to the backend queue and wakes the backend thread.
+    void enqueue_async(const mrpt::Clock::time_point& stamp, std::function<void()> fn);
+
+    /// Backend thread body: drains the queue, applies measurements in timestamp
+    /// order under stateMutex_, runs one solve, and publishes a snapshot.
+    void backend_loop();
+
+    /// Starts the backend thread if async mode is on and it is not running yet.
+    void start_backend_thread();
+
+    /// Signals the backend thread to stop and joins it.
+    void stop_backend_thread();
 
     /// Creates a new frame index for timestamp t, or returns the existing one if close enough.
     /// This also is in charge of the complex task of finding nearby existing frames and adding the
@@ -307,6 +499,20 @@ class StateEstimationSmoother : public mola::NavStateFilter,
     void fuse_pose_locked(
         const mrpt::Clock::time_point& timestamp, const mrpt::poses::CPose3DPDFGaussian& pose,
         const std::string& frame_id);
+
+    /// Wheel-odometry fusion: BetweenFactors between consecutive odometry
+    /// keyframes, plus one absolute factor, added once, to resolve
+    /// T_map_to_odom_i.
+    void fuse_odometry_relative_locked(
+        const mrpt::obs::CObservationOdometry& odom, const std::string& odomName,
+        const mrpt::poses::CPose3DPDFGaussian& absolutePoseInOdom);
+    void fuse_odometry_locked(
+        const mrpt::obs::CObservationOdometry& odom, const std::string& odomName);
+    void fuse_imu_locked(const mrpt::obs::CObservationIMU& imu);
+    void fuse_gnss_locked(const mrpt::obs::CObservationGPS& gps);
+    void fuse_twist_locked(
+        const mrpt::Clock::time_point& timestamp, const mrpt::math::TTwist3D& twist,
+        const mrpt::math::CMatrixDouble66& twistCov);
     [[nodiscard]] frame_index_t create_or_get_keyframe_by_timestamp_locked(
         const mrpt::Clock::time_point& t,
         const std::optional<double>&   overrideCloseEnough = std::nullopt);
@@ -318,6 +524,11 @@ class StateEstimationSmoother : public mola::NavStateFilter,
     /// state_.last_estimated_state
     void process_pending_gtsam_updates();
 
+    /** Sigma [rad/s] for the constant-angular-velocity factor spanning `dt` seconds.
+     *  Combines the random-walk model with the gyro measurement noise present at both
+     *  endpoints when raw gyro readings are fused (see the implementation). */
+    double angular_const_vel_sigma(double dt) const;
+
     /// Implementation of Eqs (1),(4) in the MOLA RSS2019 paper.
     void addFactor(const AbsFactorConstVelKinematics& f);
     void addFactor(const AbsFactorTricycleKinematics& f);
@@ -326,6 +537,10 @@ class StateEstimationSmoother : public mola::NavStateFilter,
     void delete_too_old_entries();
 
     void publishEstimatedGeoreferencing();
+
+    /// Advertises the REP-105 correction reference_frame -> {odom} from the
+    /// estimator's own T_map_to_odom_i (see publish_map_to_odom_tf).
+    void publishMapToOdom(const mrpt::Clock::time_point& stamp, const std::string& methodLabel);
 
     using pair_nearby_frame_iterators_t = std::pair<
         std::map<mrpt::Clock::time_point, frame_index_t>::const_iterator,
@@ -342,8 +557,23 @@ class StateEstimationSmoother : public mola::NavStateFilter,
 
     void add_kinematic_factor_between(const frame_index_t from, const frame_index_t to);
 
+    /** Withdraws the kinematic link between two keyframes, undoing
+     *  add_kinematic_factor_between(). Needed when a new keyframe is spliced
+     *  between them: the direct link they used to share must go away, or its
+     *  constraint would be counted a second time alongside the two links that now
+     *  replace it. Cheap if the link has not reached the solver yet; otherwise its
+     *  factors are queued for removal at the next update().
+     */
+    void remove_kinematic_factor_between(const frame_index_t from, const frame_index_t to);
+
     /// Gets the latest state of a pose wrt the reference frame ("map")
     [[nodiscard]] NavState get_latest_state_and_covariance(const frame_index_t idx) const;
+
+    /// Updates the low-pass-filtered predict twist with the newest keyframe's
+    /// optimized twist (dt-aware exponential moving average). No-op unless
+    /// `predict_twist_filter_enabled`. See `State::filtered_predict_twist`.
+    void update_predict_twist_filter_locked(
+        const mrpt::math::TTwist3D& rawTwist, const mrpt::Clock::time_point& stamp);
 
     /// Gets the latest estimated transform of "T_map_to_odometry_frame_i", by frame ID name.
     [[nodiscard]] std::optional<mrpt::poses::CPose3DPDFGaussian>

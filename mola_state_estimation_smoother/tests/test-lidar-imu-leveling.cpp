@@ -46,6 +46,8 @@ params:
 
     kinematic_model: KinematicModel::ConstantVelocity
     sliding_window_length: 5.0
+    relative_pose_increment_sigma_lin: 0.02
+    relative_pose_increment_sigma_ang: 0.005
 
     max_time_to_use_velocity_model: 2.0
     
@@ -125,8 +127,7 @@ void run_test()
 
     ASSERT_(stateOpt.has_value());
 
-    double y, p, r;
-    stateOpt->pose.mean.getYawPitchRoll(y, p, r);
+    const auto [y, p, r] = stateOpt->pose.mean.getYawPitchRoll();
 
     std::cout << "Final Estimated Pitch: " << mrpt::RAD2DEG(p) << " deg\n";
     std::cout << "Final Estimated Roll:  " << mrpt::RAD2DEG(r) << " deg\n";

@@ -70,6 +70,8 @@ params:
 
     # Time window to keep past observations in the filter [seconds]
     sliding_window_length: 8.0
+    relative_pose_increment_sigma_lin: 0.02
+    relative_pose_increment_sigma_ang: 0.005
     
     # Minimum time difference between frames to create a new frame [seconds]
     min_time_difference_to_create_new_frame: 0.05
@@ -289,10 +291,8 @@ void run_test(const TestCase& testCase)
                 // Compute errors
                 const auto posError =
                     (estimatedPose.asTPose() - actualVehiclePose.asTPose()).norm();
-                double yaw_est, pitch_est, roll_est;
-                estimatedPose.getYawPitchRoll(yaw_est, pitch_est, roll_est);
-                double yaw_gt, pitch_gt, roll_gt;
-                actualVehiclePose.getYawPitchRoll(yaw_gt, pitch_gt, roll_gt);
+                const auto [yaw_est, pitch_est, roll_est] = estimatedPose.getYawPitchRoll();
+                const auto [yaw_gt, pitch_gt, roll_gt]    = actualVehiclePose.getYawPitchRoll();
                 const auto headingError = std::abs(mrpt::math::angDistance(yaw_est, yaw_gt));
 
                 std::cout << "Position error: " << posError << " m\n";
@@ -323,10 +323,8 @@ void run_test(const TestCase& testCase)
         ASSERT_LT_(positionError, MAXIMUM_POSITION_ERROR);
 
         // Check heading error (yaw)
-        double yaw_est, pitch_est, roll_est;
-        estimatedPose.getYawPitchRoll(yaw_est, pitch_est, roll_est);
-        double yaw_gt, pitch_gt, roll_gt;
-        actualVehiclePose.getYawPitchRoll(yaw_gt, pitch_gt, roll_gt);
+        const auto [yaw_est, pitch_est, roll_est] = estimatedPose.getYawPitchRoll();
+        const auto [yaw_gt, pitch_gt, roll_gt]    = actualVehiclePose.getYawPitchRoll();
 
         const auto headingError = std::abs(mrpt::math::angDistance(yaw_est, yaw_gt));
         std::cout << "Heading error (yaw): " << mrpt::RAD2DEG(headingError) << " deg\n";

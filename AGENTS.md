@@ -146,7 +146,14 @@ Other behavior:
   attitude or a GNSS baseline long enough for
   `convergence_max_orientation_sigma_deg`. Estimated geo-references do not
   converge while pinned. Until something relates `{map}` to the vehicle,
-  solving is deferred (up to one window).
+  solving is deferred (up to one window). When `{map}` is observed only in
+  position (GNSS with a fixed geo-reference, no attitude), the orientation of
+  that odometry frame stays pinned: roll/pitch until IMU gravity or attitude,
+  yaw until IMU attitude or a GNSS baseline good for ~5 deg; both by a `{map}`
+  pose. `has_converged_localization()` then reports the pinned angles as
+  unknown (yaw sigma pi, roll/pitch pi/2), so a robot without IMU converges on
+  position only if `convergence_max_orientation_sigma_deg` allows it. Feature
+  macro `MOLA_STATE_ESTIMATION_SMOOTHER_HAS_ORIENTATION_GAUGE` (`Parameters.h`).
 - A new `T_map_to_odom_i` is seeded from its first reading. A new key is never
   marginalized in the update that inserts it.
 - Observations labeled `ground_truth` are ignored by both estimators unless
@@ -160,9 +167,11 @@ Georeferencing and relocalization:
 - `set_geo_reference()` / `fixed_geo_reference`: fixes `T_enu_to_map` and
   resets the estimator. Zero variances are floored to 1e-6 (singular otherwise).
 - `has_converged_localization()`: with `estimate_geo_reference=true`, true once
-  the geo-reference is known; otherwise, when the vehicle's own pose sigmas
-  pass the same thresholds. Steady-state position sigma is bounded by the raw
-  GNSS noise, so the thresholds must match the receiver.
+  the geo-reference is known; otherwise, when `{map}` is observed in the last
+  solve (not just pinned by its gauge anchor, which makes the pose look certain
+  at the odometry origin) and the vehicle's own pose sigmas pass the same thresholds.
+  Steady-state position sigma is bounded by the raw GNSS noise, so the
+  thresholds must match the receiver.
 - `fuse_imu()` applies a fixed +90 deg yaw so North-referenced IMU yaw becomes
   ENU; sources already reporting ENU yaw (e.g. simulators) need
   `imu_attitude_azimuth_offset_deg: -90`.

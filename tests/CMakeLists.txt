@@ -202,3 +202,17 @@ mola_add_test(
   LINK_LIBRARIES
     mola::mola_state_estimation_smoother
 )
+
+mola_add_test(
+  TARGET  test-imu-attitude-yaw-bias
+  SOURCES test-imu-attitude-yaw-bias.cpp
+  LINK_LIBRARIES
+    mola::mola_state_estimation_smoother
+)
+
+mola_add_test(
+  TARGET  test-imu-gravity-vibration
+  SOURCES test-imu-gravity-vibration.cpp
+  LINK_LIBRARIES
+    mola::mola_state_estimation_smoother
+)

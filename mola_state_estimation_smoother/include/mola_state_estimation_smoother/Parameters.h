@@ -107,6 +107,13 @@ class Parameters
     /// Child frame name for `publish_fused_vehicle_tf`.
     std::string fused_vehicle_frame_name = "base_link_fused";
 
+    /** If true, publish the estimated IMU attitude yaw bias (see
+     * `imu_attitude_yaw_bias_sigma_deg`) as module diagnostics, once per diagnostics period
+     * (the MOLA ROS 2 bridge publishes them as `std_msgs/Float32` topics
+     * `mola_diagnostics/<module>/imu_yaw_bias_deg` and `.../imu_yaw_bias_sigma_deg`).
+     * Default off. */
+    bool publish_imu_yaw_bias = false;
+
     /** @}  */
 
     /** @name Kinematic factors and keyframe creation (motion model)
@@ -386,11 +393,38 @@ class Parameters
      */
     double imu_attitude_azimuth_offset_deg = 0.0;
 
-    /** When using an IMU with acceleration, use this sigma to estimate the up-vector, hence
+    /** Stationary sigma [degrees] of an unknown bias of the IMU attitude azimuth (yaw), e.g.
+     * magnetometer hard/soft-iron residuals or a mounting offset, estimated as a state. All
+     * readings share it, so averaging them never brings the heading sigma below this value while
+     * nothing else observes the heading, unlike independent readings, whose fused sigma shrinks
+     * as 1/sqrt(N). Set to 0 to disable (attitude readings fused as independent).
+     */
+    double imu_attitude_yaw_bias_sigma_deg = 0.0;
+
+    /** Correlation time [s] of the IMU attitude yaw bias, modeled as a first-order Gauss-Markov
+     * process: b(k) = phi * b(k-1) + w, phi = exp(-dt/tau), var(w) = sigma^2 (1 - phi^2).
+     * Larger values make the bias, once observed (e.g. by a localization in a map), last longer.
+     */
+    double imu_attitude_yaw_bias_time_constant = 120.0;
+
+    /** Minimum period [s] between fused attitude readings of each IMU (0 = all of them, after
+     * imu_min_sample_period). Consecutive absolute attitude readings are strongly correlated, so a
+     * high rate adds cost but no information. Gravity and angular velocity are not affected.
+     */
+    double imu_attitude_min_sample_period = 0.0;
+
+    /** When using an IMU with acceleration, use this sigma [deg] to estimate the up-vector, hence
      * gravity-align the map.
      * Set to 0 to disable.
      */
-    double imu_normalized_gravity_alignment_sigma = 0.4;
+    double imu_normalized_gravity_alignment_sigma = 2.0;
+
+    /** Accelerometer readings are averaged over periods of about this length [s], and one
+     * gravity factor is fused per period (0 = one per imu_min_sample_period reading).
+     * On a vibrating vehicle short averages tilt by several degrees, while vibration averages
+     * out over ~1 s; vehicle accelerations still bias it, hence the sigma above.
+     */
+    double imu_gravity_min_sample_period = 1.0;
 
     /** When an IMU provides angular velocity (gyroscope), add a direct prior on the
      * corresponding keyframe's body-frame angular-velocity variable, sensor-to-vehicle

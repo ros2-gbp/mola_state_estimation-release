@@ -36,6 +36,7 @@
 #include <mrpt/poses/CPose3DPDFGaussian.h>
 
 #include <array>
+#include <future>
 #include <mutex>
 #include <optional>
 
@@ -109,6 +110,21 @@ class StateEstimationSimple : public mola::NavStateFilter
     void fuse_pose(
         const mrpt::Clock::time_point& timestamp, const mrpt::poses::CPose3DPDFGaussian& pose,
         const std::string& frame_id) override;
+
+#if defined(MOLA_KERNEL_NAVSTATE_FILTER_HAS_FUSE_POSE_DEFERRED)
+    /** As fuse_pose(), with a covariance that becomes ready later. It is read
+     *  lazily: the next call that reads or changes the estimate (typically the
+     *  next estimated_navstate()) fuses the reading first, waiting for its
+     *  covariance only if it is still not ready. Readings are fused in call
+     *  order: this method waits only if an earlier deferred reading's
+     *  covariance is still not ready. The result is that of calling
+     *  fuse_pose() here. fuse_imu() and buffered inputs never wait for it.
+     */
+    void fuse_pose_deferred(
+        const mrpt::Clock::time_point& timestamp, const mrpt::poses::CPose3D& mean,
+        const std::shared_future<mrpt::math::CMatrixDouble66>& cov,
+        const std::string&                                     frame_id) override;
+#endif
 
     /** Integrates new wheels-based odometry observations into the estimator.
      *  This is a convenience method that internally ends up calling
@@ -246,6 +262,18 @@ class StateEstimationSimple : public mola::NavStateFilter
         };
         std::multimap<mrpt::Clock::time_point, ImuSample> imu_history;
 
+        // Multiplier taking the accelerometer readings to m/s² (0: not decided
+        // yet), since some drivers publish them in units of g. Kept across
+        // reset(), like the history.
+        double accel_scale = 0;
+
+        // Whether any IMU reading was received (kept across reset(), like the
+        // IMU history), and whether imu_propagation already reported the lack
+        // of IMU or accelerometer readings (once per initialize()/reset()).
+        bool         imu_received  = false;
+        mutable bool no_imu_logged = false;
+        mutable bool no_acc_logged = false;
+
         // Velocity at last_pose_obs_tim, and a slowly varying acceleration
         // bias, both in the reference frame: estimated by propagating with the
         // accelerometer between poses and correcting with each new pose (see
@@ -315,6 +343,10 @@ class StateEstimationSimple : public mola::NavStateFilter
      *  Must be called with state_mtx_ already held. */
     void fuse_pending_imu_up_to(const mrpt::Clock::time_point& upTo);
 
+    /** Decides state_.accel_scale from the IMU history, once it covers the
+     *  detection span, and scales the history with it. Requires state_mtx_. */
+    void decide_accel_units();
+
     /** Strapdown integration of the IMU readings in imu_history over (t0, t1],
      *  from orientation R0 and velocity v0 (both in the reference frame).
      *  Returns nullopt if the readings do not cover the interval.
@@ -376,6 +408,31 @@ class StateEstimationSimple : public mola::NavStateFilter
         const mrpt::obs::CObservationRobotPose& obs, const std::string& odomName);
 
     State state_;
+
+    /** A fuse_pose_deferred() reading not fused yet. Guarded by state_mtx_;
+     *  not part of State, so reset() fuses it first instead of dropping it. */
+    struct DeferredPose
+    {
+        mrpt::Clock::time_point                         timestamp;
+        mrpt::poses::CPose3D                            mean;
+        std::shared_future<mrpt::math::CMatrixDouble66> cov;
+        std::string                                     frame_id;
+    };
+    std::optional<DeferredPose> deferred_pose_;
+
+    /** Fuses the pending fuse_pose_deferred() reading, if any, waiting for its
+     *  covariance without holding state_mtx_. Called first by every public
+     *  method that reads or changes the estimate, except the ones that only
+     *  buffer their input (fuse_imu()). */
+    void apply_deferred_pose();
+
+    /// Body of fuse_gnss(). Must be called with state_mtx_ already held.
+    void fuse_gnss_locked(const mrpt::obs::CObservationGPS& gps);
+
+    /// Body of fuse_pose(). Must be called with state_mtx_ already held.
+    void fuse_pose_locked(
+        const mrpt::Clock::time_point& timestamp, const mrpt::poses::CPose3DPDFGaussian& pose,
+        const std::string& frame_id);
 
     // Fixed geo-reference (datum + ENU->map) for GNSS fusion. Config-like:
     // set once via set_geo_reference() and deliberately NOT cleared by reset(),

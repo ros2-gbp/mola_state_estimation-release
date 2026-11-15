@@ -30,8 +30,12 @@
 #include <mrpt/topography/conversions.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <future>
 #include <iostream>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -1637,12 +1641,16 @@ mrpt::poses::CPose3D prop_gt_pose(double t)
 }
 
 // Feeds poses at 10 Hz up to PROP_T_LAST and IMU readings at 200 Hz up to
-// imuEnd; accelerometer readings only if withAcc.
+// imuEnd; accelerometer readings only if withAcc, divided by accelUnit (e.g.
+// 9.81 for a driver that reports them in units of g). With swapPairs, each
+// pair of consecutive IMU readings is delivered newest first.
 void prop_feed(
-    mola::state_estimation_simple::StateEstimationSimple& est, double imuEnd, bool withAcc)
+    mola::state_estimation_simple::StateEstimationSimple& est, double imuEnd, bool withAcc,
+    double accelUnit = 1.0, bool swapPairs = false)
 {
-    for (int i = 0; 0.005 * i <= imuEnd + 1e-9; i++)
+    for (int k = 0; 0.005 * k <= imuEnd + 1e-9; k++)
     {
+        const int    i = swapPairs ? (k % 2 == 0 ? k + 1 : k - 1) : k;
         const double t = 0.005 * i;
         // Specific force = R^T (a_world - g), g = (0,0,-9.81):
         const auto f = prop_gt_pose(t).inverseRotateVector({0, PROP_ACC_Y, 9.81});
@@ -1654,9 +1662,9 @@ void prop_feed(
         imu.set(mrpt::obs::IMU_WZ, PROP_WZ);
         if (withAcc)
         {
-            imu.set(mrpt::obs::IMU_X_ACC, f.x);
-            imu.set(mrpt::obs::IMU_Y_ACC, f.y);
-            imu.set(mrpt::obs::IMU_Z_ACC, f.z);
+            imu.set(mrpt::obs::IMU_X_ACC, f.x / accelUnit);
+            imu.set(mrpt::obs::IMU_Y_ACC, f.y / accelUnit);
+            imu.set(mrpt::obs::IMU_Z_ACC, f.z / accelUnit);
         }
         est.fuse_imu(imu);
 
@@ -1739,6 +1747,248 @@ params:
         base + "    imu_propagation: true\n    imu_propagation_max_time: 2.0\n"));
     prop_feed(shortImu, PROP_T_LAST + 0.2, true);
     ASSERT_NEAR_(prop_error(shortImu, PROP_T_LAST + 0.5), eLegacy, 1e-6);
+
+    std::cout << "OK\n";
+}
+
+// Accelerometer readings in units of g are detected and scaled: the
+// propagation must then equal that with the same readings in m/s².
+void test_imu_propagation_accel_in_g()
+{
+    std::cout << "[Test] IMU propagation, accelerometer in units of g... ";
+
+    const std::string cfg = R"###(
+params:
+    max_time_to_use_velocity_model: 0.75
+    sigma_random_walk_acceleration_linear: 1.0
+    sigma_random_walk_acceleration_angular: 1.0
+    sigma_relative_pose_linear: 0.01
+    sigma_relative_pose_angular: 0.01
+    sigma_imu_angular_velocity: 0.05
+    imu_propagation: true
+    imu_propagation_max_time: 2.0
+    gravity_magnitude: 9.81
+)###";
+
+    mola::state_estimation_simple::StateEstimationSimple si;
+    si.initialize(mrpt::containers::yaml::FromText(cfg));
+    prop_feed(si, 3.5, true);
+
+    mola::state_estimation_simple::StateEstimationSimple inG;
+    inG.initialize(mrpt::containers::yaml::FromText(cfg));
+    prop_feed(inG, 3.5, true, 9.81);
+
+    const double eSi = prop_error(si, PROP_T_LAST + 0.5);
+    const double eG  = prop_error(inG, PROP_T_LAST + 0.5);
+    if (VERBOSE)
+    {
+        std::cout << "\n  +0.5 s: m/s^2 " << eSi << " m, units of g " << eG << " m\n";
+    }
+    ASSERT_GE_(eSi, 0.0);
+    ASSERT_LT_(eSi, 0.1);
+    ASSERT_LT_(eG, 0.1);
+    ASSERT_NEAR_(eG, eSi, 1e-6);
+
+    // The decision depends on the timestamps, not on the delivery order. (Other
+    // parts of the estimator are not exactly order-independent around a pose,
+    // so the bound is that of a correct decision: readings in units of g taken
+    // as m/s² give about 0.09 m here.)
+    mola::state_estimation_simple::StateEstimationSimple swapped;
+    swapped.initialize(mrpt::containers::yaml::FromText(cfg));
+    prop_feed(swapped, 3.5, true, 9.81, true);
+    const double eSwapped = prop_error(swapped, PROP_T_LAST + 0.5);
+    ASSERT_GE_(eSwapped, 0.0);
+    ASSERT_LT_(eSwapped, 0.01);
+
+    // A reset() keeps the decision and the (already scaled) IMU history: the
+    // same input fused again after it matches that in m/s².
+    si.reset();
+    prop_feed(si, 3.5, true);
+    inG.reset();
+    prop_feed(inG, 3.5, true, 9.81);
+    const double eSiReset = prop_error(si, PROP_T_LAST + 0.5);
+    const double eGReset  = prop_error(inG, PROP_T_LAST + 0.5);
+    ASSERT_GE_(eSiReset, 0.0);
+    ASSERT_LT_(eSiReset, 0.1);
+    ASSERT_GE_(eGReset, 0.0);
+    ASSERT_NEAR_(eGReset, eSiReset, 1e-6);
+
+    // Readings without information (zeros while a driver starts) do not count
+    // in the decision: m/s² readings after them are taken as such, as without
+    // the zeros.
+    const auto feedZeros = [](mola::state_estimation_simple::StateEstimationSimple& est)
+    {
+        for (int i = 0; i < 80; i++)
+        {
+            mrpt::obs::CObservationIMU imu;
+            imu.timestamp = mrpt::Clock::fromDouble(-0.4 + 0.005 * i);
+            imu.set(mrpt::obs::IMU_WX, 0.0);
+            imu.set(mrpt::obs::IMU_WY, 0.0);
+            imu.set(mrpt::obs::IMU_WZ, 0.0);
+            imu.set(mrpt::obs::IMU_X_ACC, 0.0);
+            imu.set(mrpt::obs::IMU_Y_ACC, 0.0);
+            imu.set(mrpt::obs::IMU_Z_ACC, 0.0);
+            est.fuse_imu(imu);
+        }
+    };
+    mola::state_estimation_simple::StateEstimationSimple zerosAuto;
+    zerosAuto.initialize(mrpt::containers::yaml::FromText(cfg));
+    feedZeros(zerosAuto);
+    prop_feed(zerosAuto, 3.5, true);
+
+    mola::state_estimation_simple::StateEstimationSimple noZeros;
+    noZeros.initialize(mrpt::containers::yaml::FromText(cfg));
+    prop_feed(noZeros, 3.5, true);
+
+    const double eZeros = prop_error(zerosAuto, PROP_T_LAST + 0.5);
+    ASSERT_GE_(eZeros, 0.0);
+    ASSERT_LT_(eZeros, 0.1);
+    ASSERT_NEAR_(eZeros, prop_error(noZeros, PROP_T_LAST + 0.5), 1e-6);
+
+    // Units given explicitly: no detection, so propagation starts right away.
+    mola::state_estimation_simple::StateEstimationSimple given;
+    given.initialize(mrpt::containers::yaml::FromText(cfg + "    imu_accel_scale: 9.81\n"));
+    prop_feed(given, 3.5, true, 9.81);
+    const double eGiven = prop_error(given, PROP_T_LAST + 0.5);
+    ASSERT_GE_(eGiven, 0.0);
+    ASSERT_LT_(eGiven, 0.1);
+
+    std::cout << "OK\n";
+}
+
+// The units decision must not depend on the delivery order of the readings in
+// its span: with norms 1, 9 and 9 at 0, 0.4 and 0.6 s (mean above 3: m/s²),
+// delivering the one at 0.6 s before the one at 0.4 s must not decide from
+// the first reading alone. The decision is observed through the propagation
+// at rest: taken as units of g, the readings of 9.81 m/s² that follow would
+// make the propagated pose run away.
+void test_imu_propagation_accel_units_delivery_order()
+{
+    std::cout << "[Test] IMU propagation, accelerometer units vs delivery order... ";
+
+    const std::string cfg = R"###(
+params:
+    max_time_to_use_velocity_model: 0.75
+    sigma_random_walk_acceleration_linear: 1.0
+    sigma_random_walk_acceleration_angular: 1.0
+    sigma_relative_pose_linear: 0.01
+    sigma_relative_pose_angular: 0.01
+    sigma_imu_angular_velocity: 0.05
+    imu_propagation: true
+    imu_propagation_max_time: 2.0
+    gravity_magnitude: 9.81
+)###";
+
+    const auto imuAt = [](double t, double accZ)
+    {
+        mrpt::obs::CObservationIMU imu;
+        imu.timestamp = mrpt::Clock::fromDouble(t);
+        imu.set(mrpt::obs::IMU_WX, 0.0);
+        imu.set(mrpt::obs::IMU_WY, 0.0);
+        imu.set(mrpt::obs::IMU_WZ, 0.0);
+        imu.set(mrpt::obs::IMU_X_ACC, 0.0);
+        imu.set(mrpt::obs::IMU_Y_ACC, 0.0);
+        imu.set(mrpt::obs::IMU_Z_ACC, accZ);
+        return imu;
+    };
+
+    // Returns the propagated position error 0.3 s after the last pose, at rest.
+    const auto run = [&](const std::vector<double>& firstStamps)
+    {
+        mola::state_estimation_simple::StateEstimationSimple est;
+        est.initialize(mrpt::containers::yaml::FromText(cfg));
+        for (const double t : firstStamps)
+        {
+            est.fuse_imu(imuAt(t, t == 0.0 ? 1.0 : 9.0));
+        }
+        for (int i = 0; 1.2 + 0.005 * i <= 3.0 + 1e-9; i++)
+        {
+            const double t = 1.2 + 0.005 * i;
+            est.fuse_imu(imuAt(t, 9.81));
+            if (i % 20 == 0 && t <= 2.5 + 1e-9)
+            {
+                mrpt::poses::CPose3DPDFGaussian p;
+                p.cov.setDiagonal(1e-4);
+                est.fuse_pose(mrpt::Clock::fromDouble(t), p, "map");
+            }
+        }
+        const auto s = est.estimated_navstate(mrpt::Clock::fromDouble(2.8), "map");
+        ASSERT_(s.has_value());
+        return s->pose.mean.asTPose().translation().norm();
+    };
+
+    const double eInOrder   = run({0.0, 0.4, 0.6});
+    const double eReordered = run({0.0, 0.6, 0.4});
+    if (VERBOSE)
+    {
+        std::cout << "\n  in order " << eInOrder << " m, reordered " << eReordered << " m\n";
+    }
+    ASSERT_LT_(eInOrder, 0.05);
+    ASSERT_LT_(eReordered, 0.05);
+
+    std::cout << "OK\n";
+}
+
+// The twist queried at the stamp of the last fused pose must be the inertial
+// velocity at that instant, as for any later query, and not the slower
+// velocity filter of the constant-twist model.
+void test_imu_propagation_twist_at_last_pose()
+{
+    std::cout << "[Test] IMU propagation, twist at the last pose stamp... ";
+
+    mola::state_estimation_simple::StateEstimationSimple est;
+    est.initialize(mrpt::containers::yaml::FromText(R"###(
+params:
+    max_time_to_use_velocity_model: 0.75
+    sigma_random_walk_acceleration_linear: 1.0
+    sigma_random_walk_acceleration_angular: 1.0
+    sigma_relative_pose_linear: 0.5
+    sigma_relative_pose_angular: 0.01
+    sigma_imu_angular_velocity: 0.05
+    imu_propagation: true
+    imu_propagation_max_time: 2.0
+)###"));
+    prop_feed(est, 3.5, true);
+
+    // Ground-truth velocity at PROP_T_LAST, in the vehicle frame:
+    const auto v_gt =
+        prop_gt_pose(PROP_T_LAST).inverseRotateVector({PROP_V0, PROP_ACC_Y * PROP_T_LAST, 0});
+
+    const auto at = est.estimated_navstate(mrpt::Clock::fromDouble(PROP_T_LAST), "map");
+    ASSERT_(at.has_value());
+    const mrpt::math::TVector3D v_at(at->twist.vx, at->twist.vy, at->twist.vz);
+
+    const auto after = est.estimated_navstate(mrpt::Clock::fromDouble(PROP_T_LAST + 0.005), "map");
+    ASSERT_(after.has_value());
+    const mrpt::math::TVector3D v_after(after->twist.vx, after->twist.vy, after->twist.vz);
+
+    if (VERBOSE)
+    {
+        std::cout << "\n  v_gt=" << v_gt << " v_at=" << v_at << " v_after=" << v_after << "\n";
+    }
+    ASSERT_LT_((v_at - v_gt).norm(), 0.1);
+    ASSERT_LT_((v_at - v_after).norm(), 0.05);
+
+    // One clock tick before the stamp (time conversions may land there): must
+    // not hang, and gives the same velocity.
+    const auto before = est.estimated_navstate(
+        mrpt::Clock::fromDouble(PROP_T_LAST) - mrpt::Clock::duration(1), "map");
+    ASSERT_(before.has_value());
+    const mrpt::math::TVector3D v_before(before->twist.vx, before->twist.vy, before->twist.vz);
+    ASSERT_LT_((v_before - v_at).norm(), 1e-9);
+
+    // Off the IMU grid, before the next reading (5 ms period): the inertial
+    // velocity too, not the constant-twist one.
+    const double tOff = PROP_T_LAST + 0.004;
+    const auto   off  = est.estimated_navstate(mrpt::Clock::fromDouble(tOff), "map");
+    ASSERT_(off.has_value());
+    const mrpt::math::TVector3D v_off(off->twist.vx, off->twist.vy, off->twist.vz);
+    const auto v_gt_off = prop_gt_pose(tOff).inverseRotateVector({PROP_V0, PROP_ACC_Y * tOff, 0});
+    if (VERBOSE)
+    {
+        std::cout << "  v_off=" << v_off << " v_gt_off=" << v_gt_off << "\n";
+    }
+    ASSERT_LT_((v_off - v_gt_off).norm(), 0.1);
 
     std::cout << "OK\n";
 }
@@ -1905,6 +2155,169 @@ params:
     std::cout << "OK\n";
 }
 
+#if defined(MOLA_KERNEL_NAVSTATE_FILTER_HAS_FUSE_POSE_DEFERRED)
+// --------------------------------------------------------------------------
+// fuse_pose_deferred(): identical estimates to fuse_pose(), with the
+// covariances arriving late from another thread, and the caller never waits.
+// --------------------------------------------------------------------------
+void test_fuse_pose_deferred()
+{
+    std::cout << "[Test] fuse_pose_deferred... ";
+
+    const char*                                          yaml_text = R"###(
+params:
+    max_time_to_use_velocity_model: 2.0
+    sigma_random_walk_acceleration_linear: 1.0
+    sigma_random_walk_acceleration_angular: 1.0
+    sigma_relative_pose_linear: 0.5
+    sigma_relative_pose_angular: 0.1
+    velocity_filter_enabled: true
+)###";
+    mola::state_estimation_simple::StateEstimationSimple direct;
+    mola::state_estimation_simple::StateEstimationSimple deferred;
+    direct.initialize(mrpt::containers::yaml::FromText(yaml_text));
+    deferred.initialize(mrpt::containers::yaml::FromText(yaml_text));
+
+    constexpr size_t N       = 40;
+    const double     dt      = 0.1;
+    auto             mean_at = [&](size_t i)
+    {
+        const double t = dt * static_cast<double>(i);
+        return mrpt::poses::CPose3D(t + (i == 25 ? 0.2 : 0.0), 0.1 * t, 0, 0.05 * t, 0, 0);
+    };
+    auto cov_at = [](size_t i)
+    {
+        mrpt::math::CMatrixDouble66 c;
+        c.setDiagonal(i == 25 ? 1.0 : 1e-4 * (1.0 + 0.1 * static_cast<double>(i % 4)));
+        return c;
+    };
+    auto imu_at = [](double t)
+    {
+        mrpt::obs::CObservationIMU imu;
+        imu.timestamp = mrpt::Clock::fromDouble(t);
+        imu.set(mrpt::obs::TIMUDataIndex::IMU_WX, 0.0);
+        imu.set(mrpt::obs::TIMUDataIndex::IMU_WY, 0.0);
+        imu.set(mrpt::obs::TIMUDataIndex::IMU_WZ, 0.05);
+        return imu;
+    };
+
+    double maxCallMs = 0;
+    for (size_t i = 0; i < N; i++)
+    {
+        const double t     = dt * static_cast<double>(i);
+        const auto   stamp = mrpt::Clock::fromDouble(t);
+        direct.fuse_pose(stamp, mrpt::poses::CPose3DPDFGaussian(mean_at(i), cov_at(i)), "map");
+
+        // The covariance is produced 30 ms later by another thread, started
+        // first so a call that waits fails the timing check instead of hanging:
+        std::promise<mrpt::math::CMatrixDouble66> promise;
+        const auto                                cov = promise.get_future().share();
+        std::thread                               producer(
+            [&promise, &cov_at, i]()
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                promise.set_value(cov_at(i));
+            });
+        const auto t0 = std::chrono::steady_clock::now();
+        deferred.fuse_pose_deferred(stamp, mean_at(i), cov, "map");
+        // Buffered inputs never wait for it either:
+        direct.fuse_imu(imu_at(t + 0.05));
+        deferred.fuse_imu(imu_at(t + 0.05));
+        maxCallMs = std::max(
+            maxCallMs,
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                .count());
+
+        // The query fuses the deferred reading first, waiting if needed:
+        const auto query = stamp + std::chrono::milliseconds(80);
+        const auto qa    = direct.estimated_navstate(query, "map");
+        const auto qb    = deferred.estimated_navstate(query, "map");
+        producer.join();
+        ASSERT_EQUAL_(qa.has_value(), qb.has_value());
+        if (qa)
+        {
+            ASSERT_(qa->pose.mean == qb->pose.mean);
+            for (int r = 0; r < 6; r++)
+            {
+                for (int c = 0; c < 6; c++)
+                {
+                    ASSERT_EQUAL_(qa->pose.cov_inv(r, c), qb->pose.cov_inv(r, c));
+                }
+            }
+            ASSERT_EQUAL_(qa->twist.vx, qb->twist.vx);
+            ASSERT_EQUAL_(qa->twist.wz, qb->twist.wz);
+        }
+    }
+    ASSERT_LT_(maxCallMs, 20.0);
+    std::cout << "OK (slowest non-waiting call " << maxCallMs << " ms)\n";
+}
+
+// A second fuse_pose_deferred() while the first covariance is still pending
+// waits for it, so no reading is lost and the order is kept.
+void test_fuse_pose_deferred_consecutive()
+{
+    std::cout << "[Test] fuse_pose_deferred, consecutive readings... ";
+
+    const char*                                          yaml_text = R"###(
+params:
+    max_time_to_use_velocity_model: 2.0
+    sigma_relative_pose_linear: 0.5
+    sigma_relative_pose_angular: 0.1
+    velocity_filter_enabled: true
+)###";
+    mola::state_estimation_simple::StateEstimationSimple direct;
+    mola::state_estimation_simple::StateEstimationSimple deferred;
+    direct.initialize(mrpt::containers::yaml::FromText(yaml_text));
+    deferred.initialize(mrpt::containers::yaml::FromText(yaml_text));
+
+    auto mean_at = [](size_t i)
+    {
+        const double t = 0.1 * static_cast<double>(i);
+        return mrpt::poses::CPose3D(t, 0.1 * t, 0, 0.05 * t, 0, 0);
+    };
+    mrpt::math::CMatrixDouble66 cov;
+    cov.setDiagonal(1e-4);
+
+    constexpr size_t N = 20;
+    for (size_t i = 0; i < N; i += 2)
+    {
+        const auto s0 = mrpt::Clock::fromDouble(0.1 * static_cast<double>(i));
+        const auto s1 = mrpt::Clock::fromDouble(0.1 * static_cast<double>(i + 1));
+        direct.fuse_pose(s0, mrpt::poses::CPose3DPDFGaussian(mean_at(i), cov), "map");
+        direct.fuse_pose(s1, mrpt::poses::CPose3DPDFGaussian(mean_at(i + 1), cov), "map");
+
+        std::promise<mrpt::math::CMatrixDouble66> p0;
+        std::promise<mrpt::math::CMatrixDouble66> p1;
+        p1.set_value(cov);
+        std::atomic_bool firstReady{false};
+        std::thread      producer(
+            [&p0, &cov, &firstReady]()
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                firstReady = true;
+                p0.set_value(cov);
+            });
+        deferred.fuse_pose_deferred(s0, mean_at(i), p0.get_future().share(), "map");
+        deferred.fuse_pose_deferred(s1, mean_at(i + 1), p1.get_future().share(), "map");
+        const bool waited = firstReady.load();
+        producer.join();
+        ASSERT_(waited);
+
+        const auto query = s1 + std::chrono::milliseconds(50);
+        const auto qa    = direct.estimated_navstate(query, "map");
+        const auto qb    = deferred.estimated_navstate(query, "map");
+        ASSERT_EQUAL_(qa.has_value(), qb.has_value());
+        if (qa)
+        {
+            ASSERT_(qa->pose.mean == qb->pose.mean);
+            ASSERT_EQUAL_(qa->twist.vx, qb->twist.vx);
+            ASSERT_EQUAL_(qa->twist.wz, qb->twist.wz);
+        }
+    }
+    std::cout << "OK\n";
+}
+#endif
+
 int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv)
 {
     try
@@ -1927,8 +2340,15 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv)
         test_initial_twist_invalid_sigma_rejected();
         test_prediction_covariance();
         test_imu_propagation();
+        test_imu_propagation_accel_in_g();
+        test_imu_propagation_accel_units_delivery_order();
+        test_imu_propagation_twist_at_last_pose();
         test_imu_propagation_accel_bias();
         test_imu_propagation_after_3d_odometry();
+#if defined(MOLA_KERNEL_NAVSTATE_FILTER_HAS_FUSE_POSE_DEFERRED)
+        test_fuse_pose_deferred();
+        test_fuse_pose_deferred_consecutive();
+#endif
 #if defined(MOLA_KERNEL_NAVSTATE_FILTER_HAS_GEO_REFERENCE)
         test_gnss_rtk_pulls_anchor();
         test_gnss_gated_out();

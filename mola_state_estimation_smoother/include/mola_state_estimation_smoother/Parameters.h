@@ -96,6 +96,13 @@ class Parameters
      * label (e.g. `odom_wheels`) is often not that ROS frame (`odom`). */
     std::string map_to_odom_child_frame;
 
+    /** Other odometry source frame_ids (comma or space separated) whose
+     * `T_map_to_odom` is also advertised when `publish_map_to_odom_tf` is true, as
+     * `reference_frame -> <frame_id>`, so data in those frames (e.g. the local map
+     * of a LiDAR odometry source, in `lidar_odom`) can be transformed to the map
+     * frame. Sources not known or not solved yet are skipped. */
+    std::string map_to_odom_extra_frames;
+
     /** If true, `spinOnce()` additionally advertises the fused vehicle pose in a
      * separate child frame `fused_vehicle_frame_name` (default `base_link_fused`)
      * at the module rate. Because it is a distinct child frame it never collides
@@ -113,6 +120,22 @@ class Parameters
      * `mola_diagnostics/<module>/imu_yaw_bias_deg` and `.../imu_yaw_bias_sigma_deg`).
      * Default off. */
     bool publish_imu_yaw_bias = false;
+
+    /** If true (and `imu_bias_tracking`), publish the gyroscope bias of each tracked IMU as
+     * module diagnostics, once per diagnostics period: `imu_bias_<label>_gyro_{x,y,z}_deg_s`
+     * and `imu_bias_<label>_gyro_sigma_deg_s` (largest axis sigma), with the label's
+     * non-alphanumeric characters replaced by `_`, plus the motion hint counts
+     * `imu_bias_hints_static` and `imu_bias_hints_moving`. Default off. */
+    bool publish_imu_biases = false;
+
+    /** If true (and `estimate_geo_reference`), publish the geo-reference convergence
+     * as module diagnostics, once per diagnostics period: `georef_pos_sigma_m` and
+     * `georef_ori_sigma_deg` (the largest position and orientation sigmas compared
+     * against the thresholds), the thresholds themselves (`georef_max_pos_sigma_m`,
+     * `georef_max_ori_sigma_deg`), `georef_azimuth_pinned` (1 while the azimuth is
+     * still held by its initial anchor) and `georef_converged` (1 once the
+     * geo-reference has been accepted). Default off. */
+    bool publish_georef_convergence = false;
 
     /** @}  */
 
@@ -133,12 +156,13 @@ class Parameters
     /// Time to keep past observations in the filter
     double sliding_window_length = 5.0;  // [s]
 
-    /** Keep the pose of every keyframe as it leaves the sliding window, i.e.
-     *  its final optimized value, and serve them through
-     *  estimated_trajectory(). Off by default: in a live system nothing reads
-     *  them and the container would grow without bound. Intended for offline
-     *  runs that want the smoothed trajectory instead of the front end's own
-     *  registered poses.
+    /** Keep the pose of every keyframe with a pose or odometry observation as
+     *  it leaves the sliding window, i.e. its final optimized value, and
+     *  serve them through estimated_trajectory(). Off by default: in a live
+     *  system nothing reads them and the container would grow without bound.
+     *  Intended for offline runs that want the smoothed trajectory instead of
+     *  the front end's own registered poses. A reset() keeps them, and records
+     *  the keyframes still in the window as final.
      */
     bool keep_finalized_trajectory = false;
 
@@ -152,6 +176,8 @@ class Parameters
      * than a few centimeters, we may be more permissive in the temporal distance between the GNSS
      * datum and the associated existing keyframe. This parameter is the extended, alternative value
      * to use instead of "min_time_difference_to_create_new_frame". [seconds]
+     * The fix is attached to the closest keyframe, and the antenna is moved to the
+     * fix time with that keyframe's twist, so this offset does not bias the fix.
      */
     double gnss_nearby_keyframe_stamp_tolerance = 1.0;  // [s]
 
@@ -212,6 +238,17 @@ class Parameters
     double odom_motion_model_min_std_phi_deg = 0.1;  // [deg] -- see effective-floor note above
     /** @} */
 
+    /** Extra uncertainty of a planar (2D) wheel-odometry increment in the
+     *  degrees of freedom it does not measure: z, and pitch and roll. Added on
+     *  top of the 0.01 m / 0.01 rad floor above. The default 0 asserts planar
+     *  motion in the vehicle frame (no height, pitch or roll change between
+     *  readings), right for a wheeled robot on even ground; raise both for
+     *  uneven terrain, or for a platform that pitches and rolls as it moves.
+     *  @{ */
+    double odom_out_of_plane_std_z          = 0;  // [m]
+    double odom_out_of_plane_std_roll_pitch = 0;  // [rad]
+    /** @} */
+
     /** High-rate same-sensor decimation for fuse_pose() sources. If > 0,
      * readings of a given frame_id arriving less than this many seconds after
      * the last *kept* one of that same frame_id are dropped before they reach
@@ -235,6 +272,25 @@ class Parameters
      */
     double pose_min_sample_period = 0.0;  // [s]
 
+    /** A fuse_pose() reading stamped more than this after both the previous
+     * reading of the same frame_id and the newest reading of the other inputs
+     * (those that delivered readings since that one) is dropped: its stamp is
+     * wrong. Kept, it would become the newest
+     * keyframe and the tail of its source's chain of increments, so the next
+     * correct readings of that source would be dropped as out of order, and
+     * predictions would be extrapolated from a pose in the future.
+     *
+     * Both conditions are needed: a source may be ahead of slow inputs (e.g.
+     * GNSS) between their readings, or come back after a gap. A source with no
+     * other input still delivering readings is not checked. One with a period over this value,
+     * whose other inputs are all slower, may get correct readings dropped: raise it then. After 10
+     * readings in a row dropped, the stamps of that source are accepted again (e.g. inputs with
+     * unsynchronized clocks), with a warning.
+     *
+     * 0 disables it. [seconds]
+     */
+    double pose_max_lead_time = 0.5;  // [s]
+
     /** \name Per-increment accuracy of fuse_pose() odometry frames
      *  Poses given in any frame other than reference_frame_name come from a
      *  drifting source (wheel, visual or LiDAR odometry), so they are fused as
@@ -245,16 +301,21 @@ class Parameters
      *  increments' uncertainty is defined here instead.
      *  @{ */
 
-    /** Linear sigma asserted for ONE increment, whatever it spans. Required,
-     * must be > 0. Motion-dependent error belongs in
+    /** Linear sigma asserted for ONE increment, whatever it spans.
+     * Motion-dependent error belongs in
      * relative_pose_increment_sigma_per_sqrt_meter, which scales with the
      * increment and so with pose_min_sample_period. [m]
+     *
+     * 0 (default) = automatic, set by loadFrom(): 0.1 mm while IMU preintegration
+     * is enabled, 2 cm otherwise. Both values, and
+     * the default relative_pose_increment_sigma_ang, suit LiDAR odometry; wheel
+     * or visual odometry needs its own (e.g. 2 cm and 5 mrad).
      */
     double relative_pose_increment_sigma_lin = 0.0;  // [m]
 
-    /** Angular counterpart of relative_pose_increment_sigma_lin. Required, must
-     * be > 0. [rad] */
-    double relative_pose_increment_sigma_ang = 0.0;  // [rad]
+    /** Angular counterpart of relative_pose_increment_sigma_lin. Must be > 0.
+     * [rad] */
+    double relative_pose_increment_sigma_ang = 1e-5;  // [rad]
 
     /** Growth of the per-increment linear uncertainty with the distance the
      * increment spans, as a random walk: the asserted variance is
@@ -292,7 +353,11 @@ class Parameters
      */
     double imu_min_sample_period = 0.0;  // [s]
 
-    double sigma_random_walk_acceleration_linear = 0.5;  // [m/s²]
+    /** Linear random-walk sigma for the constant-velocity factor between keyframes.
+     *  It is a prior on the vehicle's acceleration, centripetal included: it must
+     *  not be tighter than the platform's real accelerations, or the optimizer
+     *  cuts every turn short and bends an accurate pose source with it. */
+    double sigma_random_walk_acceleration_linear = 5.0;  // [m/s²]
     /** Angular random-walk sigma for the constant-velocity factor between keyframes.
      *  Kept loose on purpose: a tight value makes that factor override the per-keyframe
      *  gyro prior, averaging genuine fast rotations away (the optimized W then keeps only
@@ -308,15 +373,33 @@ class Parameters
      * un-damped injects jitter into a front end's motion prior. This mirrors the
      * velocity low-pass of the lightweight estimator. On by default so the
      * prior stays smooth; it is a plain dt-aware EMA, hence deterministic and
-     * reproducible run-to-run. */
+     * reproducible run-to-run. It is not applied to a query at the newest
+     * keyframe's own stamp (within about 1 us, in any frame), which gets that
+     * keyframe's twist. With async_backend, a query right after fuse_pose() may
+     * still hit the snapshot anchored on the previous keyframe, and so get the
+     * filtered twist. */
     bool predict_twist_filter_enabled = true;
 
     /** [s] Time constant of the predict-twist low-pass
      * (predict_twist_filter_enabled). Larger = smoother prior but more lag
-     * behind genuine acceleration. */
-    double predict_twist_filter_time_const = 0.3;
-    double sigma_integrator_position       = 0.10;  // [m]
-    double sigma_integrator_orientation    = 0.10;  // [rad]
+     * behind genuine acceleration: a lagging prior at the end of a turn can
+     * pull the registration into a heading error. */
+    double predict_twist_filter_time_const = 0.1;
+
+    /** If true, the covariance of a prediction in an odometry source's own
+     * frame (the motion prior a front end such as a LiDAR odometry receives)
+     * grows with that source's measured one-step prediction error, instead of
+     * with the twist marginal of the graph: the latter mostly reflects how
+     * loosely the kinematic factors tie velocities to poses, not how well the
+     * motion is predicted. */
+    bool predict_covariance_from_residuals = true;
+
+    /** [s] Time constant of the running mean of those prediction errors. */
+    double predict_residual_time_const = 10.0;
+    /** Per-link sigma of the trapezoidal position integration. Loose, so that
+     * velocities follow the poses and not the other way around. */
+    double sigma_integrator_position    = 1.0;  // [m]
+    double sigma_integrator_orientation = 0.10;  // [rad]
 
     /** @name Floor on the uncertainty reported by estimated_navstate()
      *  @{ */
@@ -426,6 +509,14 @@ class Parameters
      */
     double imu_gravity_min_sample_period = 1.0;
 
+    /** If true, the centripetal acceleration of a turning vehicle (the gyro
+     * angular velocity times the newest estimated linear velocity) is removed
+     * from each accelerometer reading before it is averaged into a gravity
+     * observation: unlike vibration, it does not average out over a turn, and
+     * would read as a tilt towards the outside of it. Only applied to readings
+     * in m/s^2, not to accelerometers normalized to g. */
+    bool imu_gravity_compensate_centripetal = true;
+
     /** When an IMU provides angular velocity (gyroscope), add a direct prior on the
      * corresponding keyframe's body-frame angular-velocity variable, sensor-to-vehicle
      * rotated. Without this, angular velocity is only constrained by the constant-velocity
@@ -445,6 +536,93 @@ class Parameters
      * genuinely well-characterized, well-isolated gyro.
      */
     double imu_angular_velocity_sigma = 0.10;
+
+    /** If true, track the gyroscope and accelerometer biases of each IMU
+     * (mola::imu::ImuBiasTracker: standstill windows detected from its readings, vetoed by
+     * motion hints from the odometry inputs) and offer them to other modules as a
+     * mola::ImuBiasSource. Requires mola_kernel and mola_imu_preintegration versions that
+     * have them; otherwise it is ignored with a warning. Default off. */
+    bool imu_bias_tracking = false;
+
+    /// IMUs whose biases are tracked (regex of sensor labels), whether fused or not
+    /// (do_process_imu_labels_re does not apply here).
+    std::string imu_bias_labels_re = ".*";
+
+    /// If true (and `imu_bias_tracking`), subtract the tracked gyroscope bias from the
+    /// angular velocity readings before fusing them (imu_angular_velocity_sigma).
+    bool imu_bias_correct_angular_velocity = true;
+
+    /** Motion hints for the bias tracker, from the increments of each pose input (any
+     * frame, by frame name) and wheel odometry over at least `imu_bias_hint_min_period`
+     * seconds, and from fused twists: "static" if both the speed and the angular speed
+     * are below these thresholds, else "moving". The thresholds must be above the
+     * jitter of the inputs at rest (LiDAR odometry: a few mm and hundredths of a
+     * degree per scan); the speed one can be loose, since a straight constant speed
+     * motion does not bias the readings. */
+    double imu_bias_hint_max_speed             = 0.1;  // [m/s]
+    double imu_bias_hint_max_angular_speed_deg = 0.1;  // [deg/s]
+    double imu_bias_hint_min_period            = 1.0;  // [s]
+
+    /// mola::imu::ImuBiasTracker::Parameters (empty: its defaults).
+    mrpt::containers::yaml imu_bias_tracker = mrpt::containers::yaml::Map();
+
+    /** IMU preintegration between consecutive keyframes: every kinematic link
+     * whose interval is covered by raw readings gets an on-manifold
+     * preintegration factor (gtsam::ImuFactor on the raw accelerometer and
+     * gyroscope readings), and every keyframe gets a gyroscope and
+     * accelerometer bias variable, chained by a random walk. Gravity is along
+     * -z of {enu}: the factors include T_enu_to_map, so {map} may be tilted.
+     * Default on; inert without IMU readings. */
+    struct ImuPreintegration
+    {
+        bool        enabled         = true;
+        std::string sensor_label_re = ".*";  //!< IMUs used (regex of labels)
+
+        double gyro_noise_density     = 2.4e-4;  //!< [rad/s/sqrt(Hz)]
+        double accel_noise_density    = 1.6e-3;  //!< [m/s^2/sqrt(Hz)]
+        double gyro_bias_random_walk  = 2e-5;  //!< [rad/s^2/sqrt(Hz)]
+        double accel_bias_random_walk = 3e-4;  //!< [m/s^3/sqrt(Hz)]
+        double integration_sigma      = 1e-4;  //!< position integration noise
+        double gravity                = 9.80665;  //!< [m/s^2]
+
+        /** Multiplier taking the accelerometer readings to m/s^2. 0 (default):
+         * automatic, decided once from their mean norm over the first readings,
+         * since some drivers publish them in units of g. */
+        double accel_scale = 0;
+
+        double initial_gyro_bias_sigma  = 0.02;  //!< [rad/s]
+        double initial_accel_bias_sigma = 0.2;  //!< [m/s^2]
+
+        /** The constant-velocity linear factors of a link (velocity and position
+         * integration) contradict any acceleration the IMU measures: their
+         * sigmas are multiplied by this while preintegration is on. They stay,
+         * weak, so a link without IMU data is still determined. */
+        double linear_kinematics_sigma_scale = 10.0;
+
+        /// Largest gap between consecutive readings integrated across [s].
+        double max_reading_gap = 0.1;
+
+        /** Floor of the preintegrated uncertainty, added to it: unmodeled errors
+         * (timing, extrinsics, vibration), and numerical conditioning, since
+         * keyframes can be milliseconds apart. Rotation [rad], position [m],
+         * velocity [m/s]. */
+        double min_sigma_rotation = 2e-4;
+        double min_sigma_position = 1e-3;
+        double min_sigma_velocity = 5e-3;
+
+        /// Links shorter than this get no preintegration factor [s].
+        double min_link_duration = 2e-3;
+    };
+    ImuPreintegration imu_preintegration;
+
+    /** If true, the increments that fuse_pose() asserts for an odometry frame
+     * use the covariance the source publishes with each reading, as the
+     * covariance of the motion since its previous reading, instead of
+     * relative_pose_increment_sigma_*. Right for a registration against a
+     * local map built from the recent trajectory, whose covariance is relative
+     * to it; wrong for a dead-reckoned source, whose covariance grows without
+     * bound. Default off. */
+    bool relative_pose_increment_from_source_covariance = false;
 
     /** @} */
 
@@ -486,9 +664,115 @@ class Parameters
      *  Applied in whitened (normalized) residual space, so units are
      *  standard deviations, not meters. Suitable values: ~1.5 (switch to
      *  linear loss beyond 1.5σ). Set to 0 to disable robust cost (plain
-     *  Gaussian).
+     *  Gaussian). It is also the scale of the other kernels in
+     *  gnss_robust_kernel.
      */
     double gnss_huber_threshold = 1.5;  // [sigmas]
+
+    /** Robust kernel of the GNSS factors: "huber" (default), or a redescending
+     *  one, whose influence fades for large residuals: "cauchy",
+     *  "geman_mcclure" or "dcs". Scale: gnss_huber_threshold. Kernels with zero
+     *  influence beyond a cutoff (e.g. Tukey) are not offered: they leave the
+     *  geo-reference unobserved while the estimate is still far off. */
+    std::string gnss_robust_kernel = "huber";
+
+    /** \name GNSS admission tests and innovation gate
+     *  A fix must pass these before it becomes a factor. Rejections are counted
+     *  (gnss_gate_stats()) and logged as throttled warnings.
+     * @{ */
+
+    /** GGA fix qualities accepted, separated by spaces or commas (e.g. "4 5" for
+     *  RTK fixed and float only; 1: single point, 2: DGPS, 4: RTK fixed, 5: RTK
+     *  float). Empty = any valid fix (quality 0 is always discarded). */
+    std::string gnss_accepted_fix_qualities;
+
+    /** Fixes whose receiver horizontal sigma exceeds this are discarded [m].
+     *  0 = no limit. The simple estimator uses 0.20 to keep RTK-fixed only. */
+    double gnss_max_horizontal_sigma = 0.0;  // [m]
+
+    /** Fixes whose receiver horizontal sigma exceeds this many times the lowest
+     *  one received in the last `gnss_sigma_ratio_window` seconds are discarded.
+     *  Receivers that keep reporting a fixed solution while it degrades (e.g.
+     *  multipath) raise their sigma: this catches it without a receiver-specific
+     *  absolute threshold. Sigmas below `gnss_min_sigma_floor_xy` never trigger
+     *  it, since the floor makes them equivalent. 0 = disabled.
+     *
+     *  Use it only when the odometry is better than the degraded fixes: rejected
+     *  fixes no longer bound its drift. With good LiDAR-inertial odometry, 2
+     *  with floors of 0.02 / 0.05 m works well; the floors must be that low for
+     *  it to catch fixes just a few cm worse than the best ones. */
+    double gnss_max_sigma_ratio = 0.0;
+
+    /** Time window [s] for the reference sigma of `gnss_max_sigma_ratio`. It
+     *  must outlast the degraded stretches: a short one makes the degraded
+     *  fixes their own reference. */
+    double gnss_sigma_ratio_window = 300.0;  // [s]
+
+    /** Fixes whose height differs from the datum height by more than this are
+     *  discarded [m]. 0 = no limit. A cheap guard against fabricated fixes,
+     *  e.g. a datum position with zero height. */
+    double gnss_max_height_deviation = 0.0;  // [m]
+
+    /** Innovation gate: a fix is rejected if the squared Mahalanobis distance
+     *  of its ENU position to the predicted antenna position exceeds this
+     *  (chi-squared, 3 DOF; 25 is ~99.998%). 0 disables the gate. */
+    double gnss_gate_chi2 = 25.0;
+
+    /** Uncertainty of the predicted antenna position right after a good fix,
+     *  besides the fix's own [m]: extrapolation, lever arm, time-stamping. */
+    double gnss_gate_prediction_sigma = 0.5;  // [m]
+
+    /** Growth of the predicted position sigma with the distance traveled since
+     *  the last accepted fix [m/m], so that the gate opens up during a GNSS
+     *  outage instead of locking out the fixes after it. */
+    double gnss_gate_drift_per_meter = 0.02;
+
+    /** After this many consecutive rejected fixes that agree with each other,
+     *  the estimate is the one deemed wrong: they are accepted again, with a
+     *  warning. 0 = never. Agreeing means, with a prediction, that the fixes
+     *  moved like the predicted antenna (within half the predicted path, which
+     *  allows heading errors up to ~30 deg) over at least
+     *  gnss_gate_reacquire_min_path; without one, mutually consistent positions
+     *  whose displacement matches the odometry's over that same distance (or,
+     *  with no odometry at all, just mutually consistent positions).
+     *  A source at a fixed wrong position does not move with the vehicle. */
+    int gnss_gate_reacquire_after = 10;
+
+    /** Predicted displacement the vehicle must cover during a rejected run before
+     *  it can be reacquired [m]: standing still, a drifted estimate and a source at a
+     *  fixed wrong position look alike. */
+    double gnss_gate_reacquire_min_path = 5.0;  // [m]
+
+    /** Before the geo-reference converges, consecutive fixes are compared with
+     *  each other: they may not be farther apart than this speed allows, plus
+     *  their uncertainty [m/s]. */
+    double gnss_max_plausible_speed = 50.0;  // [m/s]
+
+    /** With estimate_geo_reference, the datum is defined only after this many
+     *  consecutive, mutually consistent fixes (the first of them), so a single
+     *  bogus fix at start-up cannot define the whole map frame. */
+    int gnss_datum_min_consistent_fixes = 3;
+
+    /** @} */
+
+    /** Lower bound [m] on the horizontal (East, North) standard deviation of a
+     *  GNSS fix: a receiver variance below it is raised to it. RTK fixes often
+     *  report ~1 cm, smaller than what the rest of the graph can explain
+     *  (time-stamping, lever arm, odometry noise), and an overconfident fix bends
+     *  the trajectory instead of nudging it. 0 disables it. Same name and default
+     *  as in the simple estimator.
+     */
+    double gnss_min_sigma_floor_xy = 0.10;  // [m]
+
+    /// Same floor for the vertical (Up) component [m].
+    double gnss_min_sigma_floor_z = 0.30;  // [m]
+
+    /** If not empty, the final geo-reference (geodetic datum + T_enu_to_map,
+     *  fixed or estimated) is written to this YAML file when the estimator is
+     *  destroyed, in the same format as mp2p_icp georeferencing files. Nothing
+     *  is written if no geo-reference is known by then.
+     */
+    std::string save_final_georef_to_file;
 
     /** @} */
 
@@ -498,6 +782,18 @@ class Parameters
     /** Each new sensor will become a call to isam2.update(), plus this number of additional
      * refining steps. In theory, more steps lead to more accurate results. */
     uint32_t additional_isam2_update_steps = 3;
+
+    /** iSAM2 relinearization threshold for poses, in tangent-space units (m
+     * and rad): a pose is relinearized only once its estimate moved this much
+     * from its linearization point. Coarser values leave the solution away from
+     * the optimum by more than an accurate pose source's own error. Velocities
+     * and IMU biases use a fixed 0.1. */
+    double isam2_relinearize_threshold = 0.01;
+
+    /** Eliminate the newest states last, so they stay at the root of the iSAM2
+     * Bayes tree: each update and each query of the current state then only
+     * touches a short path of the tree. Only has an effect with GTSAM 4.2. */
+    bool isam2_newest_keys_last = true;
 
     /** @} */
 

@@ -31,6 +31,7 @@
 #include <Eigen/Dense>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <fstream>
 #include <memory>
 
@@ -56,9 +57,24 @@ constexpr double kPendingOdometryMaxAge = 5.0;
 /// IMU reading for inertial propagation to still be used.
 constexpr double kImuPropagationMaxGap = 0.05;
 
+// A query this close to the last pose's stamp is at that stamp:
+constexpr auto kSameStampTolerance = std::chrono::microseconds(1);
+
 /// Extra age [s], beyond Parameters::imu_propagation_max_time, kept in the
 /// IMU history, so a query still finds the readings right after the last pose.
 constexpr double kImuHistoryMargin = 1.0;
+
+/// Span [s] of the first accelerometer readings whose mean norm decides their
+/// units, and the mean norm below which they are taken in units of g (about 1
+/// then, near 9.8 in m/s²).
+constexpr double kAccelUnitsDetectionPeriod = 0.5;
+constexpr double kAccelNormMinForSiUnits    = 3.0;
+// Readings below this norm (e.g. zeros while a driver starts) carry no
+// information on the units:
+constexpr double kAccelNormMinValid = 0.3;
+// The units are decided only once the history extends this far past the
+// detection span, so that readings delivered up to this late still count:
+constexpr double kAccelUnitsLateMargin = 0.5;
 }  // namespace
 
 StateEstimationSimple::StateEstimationSimple() = default;
@@ -91,6 +107,7 @@ void StateEstimationSimple::spinOnce()
 
 void StateEstimationSimple::reset()
 {
+    apply_deferred_pose();
     auto lck = std::scoped_lock(state_mtx_);
 
     // Buffered-but-unfused IMU readings survive the reset. They are sensor data
@@ -99,9 +116,11 @@ void StateEstimationSimple::reset()
     // own timestamp covers. Discarding them here would instead make the
     // estimate depend on how many readings happened to be delivered before the
     // reset ran, i.e. on thread scheduling rather than on the input.
-    auto pendingImu  = std::move(state_.pending_imu);
-    auto pendingOdom = std::move(state_.pending_odometry);
-    auto imuHistory  = std::move(state_.imu_history);
+    auto         pendingImu  = std::move(state_.pending_imu);
+    auto         pendingOdom = std::move(state_.pending_odometry);
+    auto         imuHistory  = std::move(state_.imu_history);
+    const bool   imuReceived = state_.imu_received;
+    const double accelScale  = state_.accel_scale;
 
     // reset:
     state_ = State();
@@ -109,6 +128,8 @@ void StateEstimationSimple::reset()
     state_.pending_imu      = std::move(pendingImu);
     state_.pending_odometry = std::move(pendingOdom);
     state_.imu_history      = std::move(imuHistory);
+    state_.imu_received     = imuReceived;
+    state_.accel_scale      = accelScale;
 
     seedInitialTwistFromParams();
 
@@ -361,6 +382,7 @@ void StateEstimationSimple::update_vel_filter(
 void StateEstimationSimple::fuse_odometry(
     const mrpt::obs::CObservationOdometry& odom, const std::string& odomName)
 {
+    apply_deferred_pose();
     auto lck = std::scoped_lock(state_mtx_);
     fuse_odometry_locked(odom, odomName);
 }
@@ -432,6 +454,7 @@ void StateEstimationSimple::fuse_odometry_locked(
 void StateEstimationSimple::fuse_odometry_3d_pose(
     const mrpt::obs::CObservationRobotPose& obs, const std::string& odomName)
 {
+    apply_deferred_pose();
     auto lck = std::scoped_lock(state_mtx_);
     fuse_odometry_3d_pose_locked(obs, odomName);
 }
@@ -561,17 +584,36 @@ void StateEstimationSimple::fuse_imu(const mrpt::obs::CObservationIMU& imu)
     // reproducible.
     state_.pending_imu.emplace(
         imu.timestamp, State::PendingImu{imuReading.wx, imuReading.wy, imuReading.wz});
+    state_.imu_received = true;
 
     if (params.imu_propagation && imu.has(mrpt::obs::TIMUDataIndex::IMU_X_ACC) &&
         imu.has(mrpt::obs::TIMUDataIndex::IMU_Y_ACC) &&
         imu.has(mrpt::obs::TIMUDataIndex::IMU_Z_ACC))
     {
-        const auto f = imu.sensorPose.rotateVector(
+        auto f = imu.sensorPose.rotateVector(
             {imu.get(mrpt::obs::TIMUDataIndex::IMU_X_ACC),
              imu.get(mrpt::obs::TIMUDataIndex::IMU_Y_ACC),
              imu.get(mrpt::obs::TIMUDataIndex::IMU_Z_ACC)});
+
+        // Some drivers publish the acceleration in units of g. Unless given,
+        // the units are decided once, from the readings in the history (in
+        // timestamp order, so not depending on the delivery order); propagation
+        // is not used until then.
+        double& scale = state_.accel_scale;
+        if (scale == 0 && params.imu_accel_scale > 0)
+        {
+            scale = params.imu_accel_scale;
+        }
+        if (scale > 0)
+        {
+            f = f * scale;
+        }
         state_.imu_history.emplace(
             imu.timestamp, State::ImuSample{{imuReading.wx, imuReading.wy, imuReading.wz}, f});
+        if (scale == 0)
+        {
+            decide_accel_units();
+        }
 
         const auto oldest =
             state_.imu_history.rbegin()->first -
@@ -619,34 +661,112 @@ void StateEstimationSimple::fuse_pending_imu_up_to(const mrpt::Clock::time_point
     state_.pending_imu.erase(state_.pending_imu.begin(), itEnd);
 }
 
+void StateEstimationSimple::decide_accel_units()
+{
+    // Mean norm of the valid readings (finite, not near zero, e.g. zeros while a
+    // driver starts) over the span from the first of them, once the history
+    // covers it and a margin for late readings: about 1 means units of g, near
+    // 9.8 m/s².
+    std::optional<mrpt::Clock::time_point> first;
+    double                                 normSum = 0;
+    std::size_t                            count   = 0;
+    bool                                   covered = false;
+    for (const auto& [stamp, sample] : state_.imu_history)
+    {
+        const double norm = sample.f.norm();
+        if (!std::isfinite(norm) || norm <= kAccelNormMinValid)
+        {
+            continue;
+        }
+        if (!first)
+        {
+            first = stamp;
+        }
+        if (mrpt::system::timeDifference(*first, stamp) > kAccelUnitsDetectionPeriod)
+        {
+            covered = mrpt::system::timeDifference(*first, state_.imu_history.rbegin()->first) >
+                      kAccelUnitsDetectionPeriod + kAccelUnitsLateMargin;
+            break;
+        }
+        normSum += norm;
+        count++;
+    }
+    if (!covered || count == 0)
+    {
+        return;
+    }
+
+    const double meanNorm = normSum / static_cast<double>(count);
+    const bool   inG      = meanNorm < kAccelNormMinForSiUnits;
+    state_.accel_scale    = inG ? params.gravity_magnitude : 1.0;
+    MRPT_LOG_INFO_FMT(
+        "imu_propagation: accelerometer readings taken in %s (mean norm %.3f over %zu readings).",
+        inG ? "units of g" : "m/s^2", meanNorm, count);
+    for (auto& [stamp, sample] : state_.imu_history)
+    {
+        sample.f = sample.f * state_.accel_scale;
+    }
+}
+
 std::optional<StateEstimationSimple::Integration> StateEstimationSimple::imu_integrate(
     const mrpt::math::CMatrixDouble33& R0, const mrpt::math::TVector3D& v0,
     const mrpt::Clock::time_point& t0, const mrpt::Clock::time_point& t1) const
 {
-    // The readings must cover the whole interval:
-    const auto itBegin = state_.imu_history.upper_bound(t0);
-    const auto itEnd   = state_.imu_history.upper_bound(t1);
-    if (itBegin == itEnd ||
-        mrpt::system::timeDifference(t0, itBegin->first) > kImuPropagationMaxGap ||
-        mrpt::system::timeDifference(std::prev(itEnd)->first, t1) > kImuPropagationMaxGap)
+    // An empty or reversed interval has nothing to integrate:
+    if (t1 <= t0)
     {
-        if (state_.imu_history.empty())
+        return {};
+    }
+
+    if (state_.imu_history.empty())
+    {
+        if (state_.imu_received)
         {
-            MRPT_LOG_THROTTLE_WARN(
-                30.0,
-                "imu_propagation is enabled but no IMU reading with accelerometer data has been "
-                "received: using the constant-twist model.");
+            if (!state_.no_acc_logged)
+            {
+                state_.no_acc_logged = true;
+                MRPT_LOG_WARN(
+                    "imu_propagation is enabled but the IMU readings carry no accelerometer "
+                    "data: using the constant-twist model.");
+            }
         }
-        else
+        else if (!state_.no_imu_logged)
         {
-            MRPT_LOG_THROTTLE_DEBUG_FMT(
-                5.0,
-                "imu_propagation: IMU readings do not cover [%.3f, %.3f] (buffered: %.3f to "
-                "%.3f): using the constant-twist model.",
-                mrpt::Clock::toDouble(t0), mrpt::Clock::toDouble(t1),
-                mrpt::Clock::toDouble(state_.imu_history.begin()->first),
-                mrpt::Clock::toDouble(state_.imu_history.rbegin()->first));
+            // Expected on platforms without an IMU, so not a warning:
+            state_.no_imu_logged = true;
+            MRPT_LOG_INFO(
+                "imu_propagation is enabled but no IMU reading has been received: using the "
+                "constant-twist model.");
         }
+        return {};
+    }
+
+    // Until the accelerometer units are decided:
+    if (state_.accel_scale == 0)
+    {
+        return {};
+    }
+
+    // The readings in (t0, t1]. With none, the newest one at or before t0 is
+    // held over the whole interval, as the newest one is held up to t1 below.
+    const auto itBegin   = state_.imu_history.upper_bound(t0);
+    const auto itEnd     = state_.imu_history.upper_bound(t1);
+    const bool holdOlder = (itBegin == itEnd);
+    const bool covered =
+        holdOlder
+            ? (itBegin != state_.imu_history.begin() &&
+               mrpt::system::timeDifference(std::prev(itBegin)->first, t1) <= kImuPropagationMaxGap)
+            : (mrpt::system::timeDifference(t0, itBegin->first) <= kImuPropagationMaxGap &&
+               mrpt::system::timeDifference(std::prev(itEnd)->first, t1) <= kImuPropagationMaxGap);
+    if (!covered)
+    {
+        MRPT_LOG_THROTTLE_DEBUG_FMT(
+            5.0,
+            "imu_propagation: IMU readings do not cover [%.3f, %.3f] (buffered: %.3f to "
+            "%.3f): using the constant-twist model.",
+            mrpt::Clock::toDouble(t0), mrpt::Clock::toDouble(t1),
+            mrpt::Clock::toDouble(state_.imu_history.begin()->first),
+            mrpt::Clock::toDouble(state_.imu_history.rbegin()->first));
         return {};
     }
 
@@ -667,13 +787,20 @@ std::optional<StateEstimationSimple::Integration> StateEstimationSimple::imu_int
         R = R * mola::imu::incremental_rotation({s.w.x, s.w.y, s.w.z}, noBias, dt);
     };
 
-    auto tPrev = t0;
-    for (auto it = itBegin; it != itEnd; ++it)
+    if (holdOlder)
     {
-        step(it->second, mrpt::system::timeDifference(tPrev, it->first));
-        tPrev = it->first;
+        step(std::prev(itBegin)->second, mrpt::system::timeDifference(t0, t1));
     }
-    step(std::prev(itEnd)->second, mrpt::system::timeDifference(tPrev, t1));
+    else
+    {
+        auto tPrev = t0;
+        for (auto it = itBegin; it != itEnd; ++it)
+        {
+            step(it->second, mrpt::system::timeDifference(tPrev, it->first));
+            tPrev = it->first;
+        }
+        step(std::prev(itEnd)->second, mrpt::system::timeDifference(tPrev, t1));
+    }
 
     Integration ret;
     ret.displacement = {p.x(), p.y(), p.z()};
@@ -692,7 +819,23 @@ std::optional<StateEstimationSimple::Propagation> StateEstimationSimple::imu_pro
     }
 
     const auto R0 = state_.last_pose->mean.getRotationMatrix();
-    auto       in = imu_integrate(R0, *state_.imu_velocity, *state_.last_pose_obs_tim, timestamp);
+
+    // At the stamp of the last pose (within kSameStampTolerance, or before it,
+    // which the caller only lets through within that tolerance) there is nothing
+    // to integrate: the IMU velocity already refers to that instant.
+    if (timestamp <= *state_.last_pose_obs_tim + kSameStampTolerance)
+    {
+        const Eigen::Vector3d vw(
+            state_.imu_velocity->x, state_.imu_velocity->y, state_.imu_velocity->z);
+        const Eigen::Vector3d vb = R0.asEigen().transpose() * vw;
+
+        Propagation ret;
+        ret.increment     = mrpt::poses::CPose3D::Identity();
+        ret.velocity_body = {vb.x(), vb.y(), vb.z()};
+        return ret;
+    }
+
+    auto in = imu_integrate(R0, *state_.imu_velocity, *state_.last_pose_obs_tim, timestamp);
     if (!in)
     {
         return {};
@@ -861,6 +1004,7 @@ void StateEstimationSimple::fuse_all_pending_odometry()
 #if defined(MOLA_KERNEL_NAVSTATE_FILTER_HAS_GEO_REFERENCE)
 void StateEstimationSimple::set_geo_reference(const mola::Georeferencing& georef)
 {
+    apply_deferred_pose();
     auto lck       = std::scoped_lock(state_mtx_);
     geo_reference_ = georef;
 }
@@ -874,7 +1018,13 @@ std::optional<mola::Georeferencing> StateEstimationSimple::get_geo_reference() c
 
 void StateEstimationSimple::fuse_gnss(const mrpt::obs::CObservationGPS& gps)
 {
+    apply_deferred_pose();
     auto lck = std::scoped_lock(state_mtx_);
+    fuse_gnss_locked(gps);
+}
+
+void StateEstimationSimple::fuse_gnss_locked(const mrpt::obs::CObservationGPS& gps)
+{
     // Same reason as in the pose paths: apply the odometry readings this
     // instant covers before using last_pose, so a GNSS correction never
     // lands on a pose whose odometry updates are still queued.
@@ -1044,8 +1194,62 @@ void StateEstimationSimple::fuse_pose(
     const mrpt::Clock::time_point& timestamp, const mrpt::poses::CPose3DPDFGaussian& pose,
     const std::string& frame_id)
 {
+    apply_deferred_pose();
     auto lck = std::scoped_lock(state_mtx_);
+    fuse_pose_locked(timestamp, pose, frame_id);
+}
 
+#if defined(MOLA_KERNEL_NAVSTATE_FILTER_HAS_FUSE_POSE_DEFERRED)
+void StateEstimationSimple::fuse_pose_deferred(
+    const mrpt::Clock::time_point& timestamp, const mrpt::poses::CPose3D& mean,
+    const std::shared_future<mrpt::math::CMatrixDouble66>& cov, const std::string& frame_id)
+{
+    ASSERT_(cov.valid());
+    for (;;)
+    {
+        apply_deferred_pose();  // an earlier one goes first
+        auto lck = std::scoped_lock(state_mtx_);
+        if (deferred_pose_)
+        {
+            continue;  // another thread stored one meanwhile
+        }
+        deferred_pose_ = DeferredPose{timestamp, mean, cov, frame_id};
+        return;
+    }
+}
+#endif
+
+void StateEstimationSimple::apply_deferred_pose()
+{
+    for (;;)
+    {
+        std::shared_future<mrpt::math::CMatrixDouble66> cov;
+        {
+            auto lck = std::scoped_lock(state_mtx_);
+            if (!deferred_pose_)
+            {
+                return;
+            }
+            if (deferred_pose_->cov.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+            {
+                const DeferredPose d = std::move(*deferred_pose_);
+                deferred_pose_.reset();
+                fuse_pose_locked(
+                    d.timestamp, mrpt::poses::CPose3DPDFGaussian(d.mean, d.cov.get()), d.frame_id);
+                return;
+            }
+            cov = deferred_pose_->cov;
+        }
+        // Without the lock: inputs that are only buffered (IMU) never wait.
+        // The pending reading may change meanwhile, so check it again.
+        cov.wait();
+    }
+}
+
+void StateEstimationSimple::fuse_pose_locked(
+    const mrpt::Clock::time_point& timestamp, const mrpt::poses::CPose3DPDFGaussian& pose,
+    const std::string& frame_id)
+{
     // The IMU readings up to this measurement's own time belong before it in
     // the filter; newer ones stay buffered (see fuse_imu()):
     // Apply the odometry readings this instant covers first, so the result
@@ -1197,6 +1401,7 @@ void StateEstimationSimple::fuse_twist(
     const mrpt::Clock::time_point& timestamp, const mrpt::math::TTwist3D& twist,
     const mrpt::math::CMatrixDouble66& twistCov)
 {
+    apply_deferred_pose();
     auto lck = std::scoped_lock(state_mtx_);
 
     // Apply the odometry readings this instant covers first, so the result
@@ -1222,6 +1427,7 @@ void StateEstimationSimple::fuse_twist(
 #if defined(MOLA_KERNEL_NAVSTATE_FILTER_HAS_TRANSFORM_FRAME)
 bool StateEstimationSimple::transform_frame(const mrpt::poses::CPose3D& b)
 {
+    apply_deferred_pose();
     auto lck = std::scoped_lock(state_mtx_);
 
     // Everything expressed in the map frame: the fused pose and the per-source
@@ -1271,6 +1477,7 @@ bool StateEstimationSimple::transform_frame(const mrpt::poses::CPose3D& b)
 std::optional<NavState> StateEstimationSimple::estimated_navstate(
     const mrpt::Clock::time_point& timestamp, [[maybe_unused]] const std::string& frame_id)
 {
+    apply_deferred_pose();
     auto lck = std::scoped_lock(state_mtx_);
 
     // Bring the filter up to the queried time, using only the IMU readings that
@@ -1289,8 +1496,10 @@ std::optional<NavState> StateEstimationSimple::estimated_navstate(
 
     // Inertial propagation, if enabled and the IMU readings cover the interval.
     // It may extrapolate further than the constant-twist model:
+    // A query up to kSameStampTolerance before the last pose is at its stamp.
     std::optional<Propagation> propagated;
-    if (params.imu_propagation && !state_.pose_already_updated_with_odom && dt >= 0 &&
+    const double sameStampTol = std::chrono::duration<double>(kSameStampTolerance).count();
+    if (params.imu_propagation && !state_.pose_already_updated_with_odom && dt >= -sameStampTol &&
         dt <= params.imu_propagation_max_time)
     {
         propagated = imu_propagate(timestamp);
@@ -1450,6 +1659,12 @@ std::optional<NavState> StateEstimationSimple::estimated_navstate(
 
 void StateEstimationSimple::onNewObservation(const CObservation::ConstPtr& o)
 {
+    // Of the inputs below, only GNSS is fused on arrival (the rest is
+    // buffered): fuse a deferred pose before it, without holding the lock.
+    if (std::dynamic_pointer_cast<const mrpt::obs::CObservationGPS>(o))
+    {
+        apply_deferred_pose();
+    }
     auto lck = std::scoped_lock(state_mtx_);
 
     const ProfilerEntry tleg(profiler_, "onNewObservation");
@@ -1536,7 +1751,7 @@ void StateEstimationSimple::onNewObservation(const CObservation::ConstPtr& o)
                 o->sensorLabel,
                 state_.do_process_gnss_labels_re.get_regex(params.do_process_gnss_labels_re)))
         {
-            this->fuse_gnss(*obsGPS);
+            fuse_gnss_locked(*obsGPS);
         }
         else
         {
@@ -1556,6 +1771,7 @@ void StateEstimationSimple::onNewObservation(const CObservation::ConstPtr& o)
 
 std::optional<mrpt::math::TTwist3D> StateEstimationSimple::get_last_twist()
 {
+    apply_deferred_pose();
     auto lck = std::scoped_lock(state_mtx_);
 
     // No time of interest is given here, so everything received is fused:

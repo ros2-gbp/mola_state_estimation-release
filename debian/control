@@ -1,0 +1,12 @@
+Source: ros-lyrical-mola-state-estimation
+Section: misc
+Priority: optional
+Maintainer: "Jose-Luis Blanco-Claraco" <jlblanco@ual.es>
+Build-Depends: debhelper (>= 9.0.0), ros-lyrical-ament-cmake, ros-lyrical-ament-cmake-xmllint <!nocheck>, ros-lyrical-ament-lint-auto <!nocheck>, ros-lyrical-ament-lint-cmake <!nocheck>, ros-lyrical-mola-state-estimation-simple, ros-lyrical-mola-state-estimation-smoother, ros-lyrical-ros-workspace
+Homepage: https://github.com/MOLAorg/mola_state_estimation
+Standards-Version: 3.9.2
+
+Package: ros-lyrical-mola-state-estimation
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ros-lyrical-mola-state-estimation-simple, ros-lyrical-mola-state-estimation-smoother, ros-lyrical-ros-workspace
+Description: Metapackage with all MOLA state estimation packages.

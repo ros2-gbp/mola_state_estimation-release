@@ -34,9 +34,12 @@ void Parameters::loadFrom(const mrpt::containers::yaml& cfg)
     MCP_LOAD_OPT(cfg, publish_map_to_odom_tf);
     MCP_LOAD_OPT(cfg, map_to_odom_frame_name);
     MCP_LOAD_OPT(cfg, map_to_odom_child_frame);
+    MCP_LOAD_OPT(cfg, map_to_odom_extra_frames);
     MCP_LOAD_OPT(cfg, publish_fused_vehicle_tf);
     MCP_LOAD_OPT(cfg, fused_vehicle_frame_name);
     MCP_LOAD_OPT(cfg, publish_imu_yaw_bias);
+    MCP_LOAD_OPT(cfg, publish_imu_biases);
+    MCP_LOAD_OPT(cfg, publish_georef_convergence);
 
     // Kinematic factors and keyframe creation (motion model)
     // -------------------------------------------------------
@@ -49,6 +52,8 @@ void Parameters::loadFrom(const mrpt::containers::yaml& cfg)
     MCP_LOAD_OPT(cfg, sigma_random_walk_acceleration_angular);
     MCP_LOAD_OPT(cfg, predict_twist_filter_enabled);
     MCP_LOAD_OPT(cfg, predict_twist_filter_time_const);
+    MCP_LOAD_OPT(cfg, predict_covariance_from_residuals);
+    MCP_LOAD_OPT(cfg, predict_residual_time_const);
     // Wheel odometry is always fused as relative increments. The key is still
     // accepted when set to true, so existing configuration files keep working.
     if (cfg.has("odometry_relative_factors"))
@@ -79,6 +84,8 @@ void Parameters::loadFrom(const mrpt::containers::yaml& cfg)
     MCP_LOAD_OPT(cfg, odom_motion_model_a4);
     MCP_LOAD_OPT(cfg, odom_motion_model_min_std_xy);
     MCP_LOAD_OPT(cfg, odom_motion_model_min_std_phi_deg);
+    MCP_LOAD_OPT(cfg, odom_out_of_plane_std_z);
+    MCP_LOAD_OPT(cfg, odom_out_of_plane_std_roll_pitch);
 
     MCP_LOAD_OPT(cfg, async_backend);
     MCP_LOAD_OPT(cfg, fast_predictor_buffer_length);
@@ -110,11 +117,94 @@ void Parameters::loadFrom(const mrpt::containers::yaml& cfg)
     ASSERT_GT_(imu_attitude_yaw_bias_time_constant, 0.0);
     MCP_LOAD_OPT(cfg, imu_normalized_gravity_alignment_sigma);
     MCP_LOAD_OPT(cfg, imu_gravity_min_sample_period);
+    MCP_LOAD_OPT(cfg, imu_gravity_compensate_centripetal);
     MCP_LOAD_OPT(cfg, imu_angular_velocity_sigma);
+    MCP_LOAD_OPT(cfg, imu_bias_tracking);
+    MCP_LOAD_OPT(cfg, imu_bias_labels_re);
+    MCP_LOAD_OPT(cfg, imu_bias_correct_angular_velocity);
+    MCP_LOAD_OPT(cfg, imu_bias_hint_max_speed);
+    MCP_LOAD_OPT(cfg, imu_bias_hint_max_angular_speed_deg);
+    MCP_LOAD_OPT(cfg, imu_bias_hint_min_period);
+    if (cfg.has("imu_bias_tracker"))
+    {
+        const mrpt::containers::yaml sub = cfg["imu_bias_tracker"];
+        imu_bias_tracker                 = sub;
+    }
+    if (cfg.has("imu_preintegration"))
+    {
+        const mrpt::containers::yaml c  = cfg["imu_preintegration"];
+        auto&                        ip = imu_preintegration;
+        ip.enabled                      = c.getOrDefault("enabled", ip.enabled);
+        ip.sensor_label_re              = c.getOrDefault("sensor_label_re", ip.sensor_label_re);
+        ip.gyro_noise_density  = c.getOrDefault("gyro_noise_density", ip.gyro_noise_density);
+        ip.accel_noise_density = c.getOrDefault("accel_noise_density", ip.accel_noise_density);
+        ip.gyro_bias_random_walk =
+            c.getOrDefault("gyro_bias_random_walk", ip.gyro_bias_random_walk);
+        ip.accel_bias_random_walk =
+            c.getOrDefault("accel_bias_random_walk", ip.accel_bias_random_walk);
+        ip.integration_sigma = c.getOrDefault("integration_sigma", ip.integration_sigma);
+        ip.gravity           = c.getOrDefault("gravity", ip.gravity);
+        ip.accel_scale       = c.getOrDefault("accel_scale", ip.accel_scale);
+        ip.initial_gyro_bias_sigma =
+            c.getOrDefault("initial_gyro_bias_sigma", ip.initial_gyro_bias_sigma);
+        ip.initial_accel_bias_sigma =
+            c.getOrDefault("initial_accel_bias_sigma", ip.initial_accel_bias_sigma);
+        ip.linear_kinematics_sigma_scale =
+            c.getOrDefault("linear_kinematics_sigma_scale", ip.linear_kinematics_sigma_scale);
+        ip.max_reading_gap    = c.getOrDefault("max_reading_gap", ip.max_reading_gap);
+        ip.min_sigma_rotation = c.getOrDefault("min_sigma_rotation", ip.min_sigma_rotation);
+        ip.min_sigma_position = c.getOrDefault("min_sigma_position", ip.min_sigma_position);
+        ip.min_sigma_velocity = c.getOrDefault("min_sigma_velocity", ip.min_sigma_velocity);
+        ip.min_link_duration  = c.getOrDefault("min_link_duration", ip.min_link_duration);
+        ASSERT_GT_(ip.gyro_noise_density, 0.0);
+        ASSERT_GT_(ip.accel_noise_density, 0.0);
+        ASSERT_GT_(ip.gyro_bias_random_walk, 0.0);
+        ASSERT_GT_(ip.accel_bias_random_walk, 0.0);
+        ASSERT_GE_(ip.linear_kinematics_sigma_scale, 1.0);
+        ASSERT_GE_(ip.accel_scale, 0.0);
+    }
 
     // Geo-referencing
     // -----------------------------------------------------
     MCP_LOAD_OPT(cfg, gnss_huber_threshold);
+    MCP_LOAD_OPT(cfg, gnss_robust_kernel);
+    ASSERTMSG_(
+        gnss_robust_kernel == "huber" || gnss_robust_kernel == "cauchy" ||
+            gnss_robust_kernel == "geman_mcclure" || gnss_robust_kernel == "dcs",
+        "gnss_robust_kernel must be one of: huber, cauchy, geman_mcclure, dcs");
+    MCP_LOAD_OPT(cfg, gnss_accepted_fix_qualities);
+    ASSERTMSG_(
+        gnss_accepted_fix_qualities.find_first_not_of("0123456789 ,\t") == std::string::npos,
+        "gnss_accepted_fix_qualities must be a list of integers, e.g. \"4 5\"");
+    MCP_LOAD_OPT(cfg, gnss_max_horizontal_sigma);
+    MCP_LOAD_OPT(cfg, gnss_max_sigma_ratio);
+    MCP_LOAD_OPT(cfg, gnss_sigma_ratio_window);
+    MCP_LOAD_OPT(cfg, gnss_max_height_deviation);
+    MCP_LOAD_OPT(cfg, gnss_gate_chi2);
+    MCP_LOAD_OPT(cfg, gnss_gate_prediction_sigma);
+    MCP_LOAD_OPT(cfg, gnss_gate_drift_per_meter);
+    MCP_LOAD_OPT(cfg, gnss_gate_reacquire_after);
+    MCP_LOAD_OPT(cfg, gnss_gate_reacquire_min_path);
+    ASSERT_GE_(gnss_gate_reacquire_min_path, 0.0);
+    MCP_LOAD_OPT(cfg, gnss_max_plausible_speed);
+    MCP_LOAD_OPT(cfg, gnss_datum_min_consistent_fixes);
+    ASSERT_GE_(gnss_max_horizontal_sigma, 0.0);
+    ASSERTMSG_(
+        gnss_max_sigma_ratio == 0.0 || gnss_max_sigma_ratio >= 1.0,
+        "gnss_max_sigma_ratio must be 0 (disabled) or >= 1");
+    ASSERT_GT_(gnss_sigma_ratio_window, 0.0);
+    ASSERT_GE_(gnss_max_height_deviation, 0.0);
+    ASSERT_GE_(gnss_gate_chi2, 0.0);
+    ASSERT_GT_(gnss_gate_prediction_sigma, 0.0);
+    ASSERT_GE_(gnss_gate_drift_per_meter, 0.0);
+    ASSERT_GE_(gnss_gate_reacquire_after, 0);
+    ASSERT_GT_(gnss_max_plausible_speed, 0.0);
+    ASSERT_GE_(gnss_datum_min_consistent_fixes, 1);
+    MCP_LOAD_OPT(cfg, gnss_min_sigma_floor_xy);
+    MCP_LOAD_OPT(cfg, gnss_min_sigma_floor_z);
+    ASSERT_GE_(gnss_min_sigma_floor_xy, 0.0);
+    ASSERT_GE_(gnss_min_sigma_floor_z, 0.0);
+    MCP_LOAD_OPT(cfg, save_final_georef_to_file);
     MCP_LOAD_OPT(cfg, estimate_geo_reference);
 
     if (cfg.has("fixed_geo_reference"))
@@ -146,6 +236,8 @@ void Parameters::loadFrom(const mrpt::containers::yaml& cfg)
     // Nonlinear optimization
     // -----------------------------------------------------
     MCP_LOAD_OPT(cfg, additional_isam2_update_steps);
+    MCP_LOAD_OPT(cfg, isam2_relinearize_threshold);
+    MCP_LOAD_OPT(cfg, isam2_newest_keys_last);
 
     // name Sensor input names
     // -----------------------------------------------------
@@ -153,18 +245,27 @@ void Parameters::loadFrom(const mrpt::containers::yaml& cfg)
     MCP_LOAD_OPT(cfg, do_process_odometry_labels_re);
     MCP_LOAD_OPT(cfg, fuse_ground_truth_label);
     MCP_LOAD_OPT(cfg, pose_min_sample_period);
-    MCP_LOAD_REQ(cfg, relative_pose_increment_sigma_lin);
-    MCP_LOAD_REQ(cfg, relative_pose_increment_sigma_ang);
+    MCP_LOAD_OPT(cfg, pose_max_lead_time);
+    MCP_LOAD_OPT(cfg, relative_pose_increment_sigma_lin);
+    MCP_LOAD_OPT(cfg, relative_pose_increment_sigma_ang);
     MCP_LOAD_OPT(cfg, relative_pose_increment_sigma_per_sqrt_meter);
     MCP_LOAD_OPT(cfg, relative_pose_increment_sigma_per_sqrt_rad);
     MCP_LOAD_OPT(cfg, pose_robust_huber_threshold);
+    MCP_LOAD_OPT(cfg, relative_pose_increment_from_source_covariance);
     MCP_LOAD_OPT(cfg, do_process_gnss_labels_re);
 
     ASSERTMSG_(pose_min_sample_period >= 0, "pose_min_sample_period must be >= 0");
+    ASSERTMSG_(pose_max_lead_time >= 0, "pose_max_lead_time must be >= 0");
     ASSERTMSG_(
-        relative_pose_increment_sigma_lin > 0 && relative_pose_increment_sigma_ang > 0,
-        "relative_pose_increment_sigma_lin/_ang must be > 0: they define the uncertainty of "
+        relative_pose_increment_sigma_lin >= 0 && relative_pose_increment_sigma_ang > 0,
+        "relative_pose_increment_sigma_lin must be >= 0 (0: automatic) and "
+        "relative_pose_increment_sigma_ang > 0: they define the uncertainty of "
         "each increment of an odometry source fused with fuse_pose()");
+    if (relative_pose_increment_sigma_lin == 0)
+    {
+        // The tight value pays off only together with IMU preintegration:
+        relative_pose_increment_sigma_lin = imu_preintegration.enabled ? 1e-4 : 0.02;
+    }
     ASSERTMSG_(
         relative_pose_increment_sigma_per_sqrt_meter >= 0 &&
             relative_pose_increment_sigma_per_sqrt_rad >= 0,

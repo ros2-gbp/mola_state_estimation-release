@@ -5,7 +5,7 @@
 -->
 <package format="3">
   <name>mola_georeferencing</name>
-  <version>3.2.0</version>
+  <version>3.3.0</version>
   <description>C++ library for georeferencing key-frame maps (simplemaps) and related CLI tools</description>
 
   <maintainer email="joseluisblancoc@gmail.com">Jose-Luis Blanco-Claraco</maintainer>
@@ -23,6 +23,7 @@
   <depend>mola_yaml</depend>
   <depend>mp2p_icp</depend>
   <depend>mrpt_maps</depend>
+  <depend>mrpt_poses</depend>
 
   <doc_depend>doxygen</doc_depend>
 

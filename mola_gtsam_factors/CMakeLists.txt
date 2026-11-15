@@ -47,22 +47,27 @@ mola_add_library(
     include/mola_gtsam_factors/FactorConstLocalVelocity.h
     include/mola_gtsam_factors/FactorGnssEnu.h
     include/mola_gtsam_factors/FactorGnssMapEnu.h
+    include/mola_gtsam_factors/FactorGnssMapEnuConstVel.h
     include/mola_gtsam_factors/FactorTrapezoidalIntegrator.h
     include/mola_gtsam_factors/FactorTricycleKinematic.h
     include/mola_gtsam_factors/gtsam_detect_version.h
     include/mola_gtsam_factors/id.h
     include/mola_gtsam_factors/imu_helpers.h
+    include/mola_gtsam_factors/imu_preintegration.h
     include/mola_gtsam_factors/MapGravityFactor.h
     include/mola_gtsam_factors/MeasuredGravityFactor.h
+    include/mola_gtsam_factors/mrpt_gtsam_compat.h
     include/mola_gtsam_factors/Pose3RotationFactor.h
     include/mola_gtsam_factors/Pose3RotationYawBiasFactor.h
     src/FactorAngularVelocityIntegration.cpp
     src/FactorConstLocalVelocity.cpp
     src/FactorGnssEnu.cpp
     src/FactorGnssMapEnu.cpp
+    src/FactorGnssMapEnuConstVel.cpp
     src/FactorTrapezoidalIntegrator.cpp
     src/FactorTricycleKinematic.cpp
     src/imu_helpers.cpp
+    src/imu_preintegration.cpp
     src/MapGravityFactor.cpp
     src/MeasuredGravityFactor.cpp
     src/Pose3RotationFactor.cpp

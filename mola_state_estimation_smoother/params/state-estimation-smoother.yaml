@@ -44,6 +44,10 @@ params:
   # REP-105 odom /tf frame the external wheel driver publishes odom->base_link
   # for (they must match for map->odom->base_link to connect).
   map_to_odom_child_frame: "${MOLA_MAP_TO_ODOM_CHILD_FRAME|}"
+  # Other odometry source frame_ids (comma or space separated) whose T_map_to_odom is
+  # also published, as reference_frame -> <frame_id> (e.g. "lidar_odom", to draw the
+  # LiDAR odometry local map in the map frame).
+  map_to_odom_extra_frames: "${MOLA_MAP_TO_ODOM_EXTRA_FRAMES|}"
 
   # If true, also advertise the fused vehicle pose in a distinct child frame
   # (below) at the module rate: a high-rate fused pose that never collides with
@@ -55,6 +59,16 @@ params:
   # as module diagnostics, once per diagnostics period: the ROS 2 bridge publishes them as
   # std_msgs/Float32 mola_diagnostics/<module>/imu_yaw_bias_deg and imu_yaw_bias_sigma_deg.
   publish_imu_yaw_bias: ${MOLA_NAVSTATE_PUBLISH_IMU_YAW_BIAS|false}
+
+  # If true (and imu_bias_tracking), publish each IMU gyroscope bias as module diagnostics:
+  # mola_diagnostics/<module>/imu_bias_<label>_gyro_{x,y,z}_deg_s and ..._gyro_sigma_deg_s.
+  publish_imu_biases: ${MOLA_NAVSTATE_PUBLISH_IMU_BIASES|false}
+
+  # If true (and estimate_geo_reference), publish the geo-reference convergence as module
+  # diagnostics, once per diagnostics period: georef_pos_sigma_m, georef_ori_sigma_deg,
+  # their thresholds georef_max_pos_sigma_m and georef_max_ori_sigma_deg,
+  # georef_azimuth_pinned and georef_converged (0/1).
+  publish_georef_convergence: ${MOLA_SE_PUBLISH_GEOREF_CONVERGENCE|false}
 
   # --------------------------------------------------------------------------
   # Kinematic Model & Motion Factors
@@ -68,7 +82,8 @@ params:
   sliding_window_length: ${MOLA_NAVSTATE_SLIDING_WINDOW_SEC|6.0}
 
   # Keep each keyframe's pose as it leaves the window (its final optimized
-  # value) and serve them via estimated_trajectory(). Offline instrumentation:
+  # value) and serve them via estimated_trajectory(). Only keyframes with a pose or
+  # odometry observation (not IMU, twist or GNSS only). Offline instrumentation:
   # the container grows with the run, so it stays off in a live system.
   keep_finalized_trajectory: ${MOLA_SMOOTHER_KEEP_TRAJECTORY|false}
 
@@ -93,6 +108,7 @@ params:
   # than a few centimeters, we may be more permissive in the temporal distance between the GNSS
   # datum and the associated existing keyframe. This parameter is the extended, alternative value
   # to use instead of "min_time_difference_to_create_new_frame". [seconds]
+  # The fix goes to the closest keyframe, moved to the fix time with its twist.
   gnss_nearby_keyframe_stamp_tolerance: 1.0
 
   # When adding IMU observations, this is the temporal distance between the IMU reading
@@ -130,6 +146,12 @@ params:
   odom_motion_model_min_std_xy: ${MOLA_ODOM_MOTION_MODEL_MIN_STD_XY|1e-3} # [m], see effective-floor note above
   odom_motion_model_min_std_phi_deg: ${MOLA_ODOM_MOTION_MODEL_MIN_STD_PHI_DEG|0.1} # [deg], see effective-floor note above
 
+  # Extra uncertainty of a planar wheel-odometry increment in what it does not
+  # measure (z; pitch and roll), on top of that floor. 0 asserts planar motion
+  # in the vehicle frame: right on even ground, raise both on uneven terrain.
+  odom_out_of_plane_std_z: ${MOLA_ODOM_OUT_OF_PLANE_STD_Z|0} # [m]
+  odom_out_of_plane_std_roll_pitch: ${MOLA_ODOM_OUT_OF_PLANE_STD_ROLL_PITCH|0} # [rad]
+
   # High-rate same-sensor decimation for IMU [seconds]. If > 0, readings are
   # averaged over periods of this length and one average per period is fused,
   # so vibration faster than that does not alias into the factors. 0 = fuse
@@ -146,8 +168,11 @@ params:
   # false (MOLA_ASYNC_BACKEND=false) to get the deterministic synchronous path.
   async_backend: ${MOLA_ASYNC_BACKEND|true}
 
-  # Random walk model for linear acceleration uncertainty [m/s²]
-  sigma_random_walk_acceleration_linear: ${MOLA_NAVSTATE_SIGMA_RANDOM_WALK_LINACC|0.5}
+  # Random walk model for linear acceleration uncertainty [m/s²]. A prior on
+  # the vehicle's acceleration, centripetal included: if tighter than the real
+  # accelerations of the platform, the optimizer cuts turns short and bends an
+  # accurate pose source with it (the source only constrains increments).
+  sigma_random_walk_acceleration_linear: ${MOLA_NAVSTATE_SIGMA_RANDOM_WALK_LINACC|5.0}
 
   # Random walk model for angular acceleration uncertainty [rad/s²]
   # Kept loose so the constant-velocity factor does not override the per-keyframe gyro
@@ -158,15 +183,26 @@ params:
   # extrapolation prior. The newest keyframe is the boundary node of the window
   # (constrained on one side only), so its raw velocity is the noisiest in the
   # graph; extrapolating it un-damped injects jitter into a front end's motion
-  # prior. On by default (deterministic dt-aware EMA).
+  # prior. On by default (deterministic dt-aware EMA). Keep the time constant
+  # short: a lagging prior at the end of a turn pulls the registration off.
+  # Not applied to a query at the newest keyframe's own stamp.
   predict_twist_filter_enabled: ${MOLA_NAVSTATE_PREDICT_TWIST_FILTER|true}
-  predict_twist_filter_time_const: ${MOLA_NAVSTATE_PREDICT_TWIST_TAU|0.3}
+  predict_twist_filter_time_const: ${MOLA_NAVSTATE_PREDICT_TWIST_TAU|0.1}
+
+  # Covariance of a prediction in an odometry source's own frame (the motion
+  # prior a LiDAR odometry front end receives): from that source's measured
+  # one-step prediction errors (running mean, time constant in seconds), not
+  # from the graph's twist marginal, which mostly reflects how loosely the
+  # kinematic factors tie velocities to poses.
+  predict_covariance_from_residuals: ${MOLA_NAVSTATE_PREDICT_COV_FROM_RESIDUALS|true}
+  predict_residual_time_const: ${MOLA_NAVSTATE_PREDICT_RESIDUAL_TAU|10.0}
 
   # Uncertainty of the kinematic (numerical integration) factors that tie two
   # consecutive keyframe poses through the twist. NOT scaled by dt: these are
   # per-link sigmas, so their effective stiffness depends on the keyframe rate.
-  # Integrator uncertainty for position [m]
-  sigma_integrator_position: ${MOLA_NAVSTATE_SIGMA_INTEGRATOR_POS|0.1}
+  # Integrator uncertainty for position [m]. Loose, so that the velocities
+  # follow the poses and not the other way around.
+  sigma_integrator_position: ${MOLA_NAVSTATE_SIGMA_INTEGRATOR_POS|1.0}
 
   # Integrator uncertainty for orientation [rad]. Note this ships 10x looser
   # than the class default (0.1 rad): at 1.0 rad (57 deg) the orientation
@@ -214,6 +250,11 @@ params:
   #     will not converge.
   #   - Pure odometry (no GNSS)      : optional. Without it, the map frame is the frame of the
   #     first odometry source; with it, the map origin is the robot's first pose.
+  #
+  # The pinned pose has identity rotation, so {map} is then as tilted as the robot's first
+  # pose (e.g. a base_link that is not level, or an IMU-defined base_link mounted upside
+  # down). Gravity-dependent factors take gravity from T_enu_to_map, so a tilted {map} is
+  # fine for them.
   #
   # When to leave empty:
   #   - estimate_geo_reference=false with GNSS and a pre-built geo-referenced map: the robot
@@ -277,6 +318,11 @@ params:
   # vibrating vehicle tilt by several degrees; vibration averages out over ~1 s.
   imu_gravity_min_sample_period: "${MOLA_IMU_GRAVITY_MIN_SAMPLE_PERIOD|1.0}"
 
+  # Remove the centripetal acceleration of a turn (gyro x estimated velocity)
+  # from the accelerometer before averaging it: it does not average out over a
+  # turn, and would read as a tilt towards its outside.
+  imu_gravity_compensate_centripetal: ${MOLA_IMU_GRAVITY_COMPENSATE_CENTRIPETAL|true}
+
   # When an IMU provides angular velocity (gyroscope), add a direct prior on the
   # corresponding keyframe's body-frame angular-velocity variable [rad/s], instead of
   # leaving it constrained only by the constant-velocity kinematic factor between
@@ -284,6 +330,42 @@ params:
   # sample taken as the keyframe-interval average on a vibrating platform; tighter
   # values over-constrain and can make the window singular. See Parameters.h.
   imu_angular_velocity_sigma: "${MOLA_IMU_ANGULAR_VELOCITY_SIGMA|0.10}"
+
+  # IMU bias tracking: gyroscope and accelerometer biases of each IMU, updated at every
+  # standstill (detected from its readings, vetoed by motion hints from the odometry
+  # inputs), offered to other modules (mola::ImuBiasSource, e.g. LiDAR odometry deskew).
+  imu_bias_tracking: ${MOLA_NAVSTATE_IMU_BIAS_TRACKING|false}
+  # IMUs tracked, whether fused or not (do_process_imu_labels_re does not apply):
+  imu_bias_labels_re: "${MOLA_NAVSTATE_IMU_BIAS_LABELS|.*}"
+  # Subtract the tracked gyro bias from the fused angular velocities:
+  imu_bias_correct_angular_velocity: true
+  # Motion hints: "static" below both thresholds (above the inputs' jitter at rest),
+  # over pose increments of at least:
+  imu_bias_hint_max_speed: 0.1  # [m/s]
+  imu_bias_hint_max_angular_speed_deg: 0.1  # [deg/s]
+  imu_bias_hint_min_period: 1.0  # [s]
+  # mola::imu::ImuBiasTracker parameters (defaults if not given):
+  imu_bias_tracker:
+    standstill_window: 1.0  # [s]
+    # [s] how long readings wait for odometry hints: hint period plus odometry latency
+    max_hint_latency: 1.0
+
+  # IMU preintegration between consecutive keyframes (gtsam::ImuFactor on the raw
+  # readings), with gyroscope and accelerometer biases as states. Gravity is along -z
+  # of {enu} (through T_enu_to_map), so {map} need not be level. Noise densities are
+  # per sqrt(Hz). Inert without IMU readings.
+  imu_preintegration:
+    enabled: ${MOLA_SMOOTHER_IMU_PREINTEGRATION|true}
+    sensor_label_re: "${MOLA_SMOOTHER_IMU_PREINT_LABELS|.*}"
+    gyro_noise_density: ${MOLA_IMU_GYRO_NOISE_DENSITY|2.4e-4}  # [rad/s/sqrt(Hz)]
+    accel_noise_density: ${MOLA_IMU_ACC_NOISE_DENSITY|1.6e-3}  # [m/s^2/sqrt(Hz)]
+    gyro_bias_random_walk: ${MOLA_IMU_GYRO_BIAS_RW|2e-5}  # [rad/s^2/sqrt(Hz)]
+    accel_bias_random_walk: ${MOLA_IMU_ACC_BIAS_RW|3e-4}  # [m/s^3/sqrt(Hz)]
+    # Multiplier taking the accelerometer readings to m/s^2. 0 = automatic: some
+    # drivers publish them in units of g, told apart once by their mean norm.
+    accel_scale: ${MOLA_IMU_ACC_SCALE|0}
+    # Constant-velocity linear factors are kept, this much weaker, on every link:
+    linear_kinematics_sigma_scale: ${MOLA_SMOOTHER_IMU_PREINT_KIN_SCALE|10.0}
 
   # --------------------------------------------------------------------------
   # Geo-referencing
@@ -294,6 +376,36 @@ params:
   # assumed to be given from either these initial parameters or, if not set, from an external
   # source (e.g. a geo-referenced .mm map loaded in mola_lidar_odometry).
   estimate_geo_reference: "${MOLA_ESTIMATE_GEO_REF|false}"
+
+  # Lower bounds [m] on the horizontal and vertical sigmas of a GNSS fix. RTK
+  # receivers report ~1 cm, less than time-stamping, lever arm and odometry
+  # errors: below these floors an overconfident fix bends the trajectory.
+  # 0 = use the receiver covariance as is.
+  gnss_min_sigma_floor_xy: ${MOLA_NAVSTATE_GNSS_MIN_SIGMA_XY|0.10}
+  gnss_min_sigma_floor_z: ${MOLA_NAVSTATE_GNSS_MIN_SIGMA_Z|0.30}
+
+  # GNSS robust kernel: huber, or redescending cauchy, geman_mcclure, dcs
+  # (scale: gnss_huber_threshold).
+  gnss_robust_kernel: ${MOLA_NAVSTATE_GNSS_ROBUST_KERNEL|huber}
+
+  # GNSS admission tests and innovation gate (see Parameters.h). Rejected fixes
+  # are logged and counted.
+  gnss_accepted_fix_qualities: "${MOLA_NAVSTATE_GNSS_FIX_QUALITIES|}"  # e.g. "4 5"; empty = any
+  gnss_max_horizontal_sigma: ${MOLA_NAVSTATE_GNSS_MAX_HORIZ_SIGMA|0.0}  # [m], 0 = no limit
+  gnss_max_sigma_ratio: ${MOLA_NAVSTATE_GNSS_MAX_SIGMA_RATIO|0.0}  # vs. the lowest recent sigma, 0 = off
+  gnss_sigma_ratio_window: ${MOLA_NAVSTATE_GNSS_SIGMA_RATIO_WINDOW|300.0}  # [s]
+  gnss_max_height_deviation: ${MOLA_NAVSTATE_GNSS_MAX_HEIGHT_DEV|0.0}  # [m] from the datum, 0 = no limit
+  gnss_gate_chi2: ${MOLA_NAVSTATE_GNSS_GATE_CHI2|25.0}  # 0 = no innovation gate
+  gnss_gate_prediction_sigma: ${MOLA_NAVSTATE_GNSS_GATE_PRED_SIGMA|0.5}  # [m]
+  gnss_gate_drift_per_meter: ${MOLA_NAVSTATE_GNSS_GATE_DRIFT|0.02}  # [m/m]
+  gnss_gate_reacquire_after: ${MOLA_NAVSTATE_GNSS_GATE_REACQUIRE|10}  # fixes, 0 = never
+  gnss_gate_reacquire_min_path: ${MOLA_NAVSTATE_GNSS_GATE_REACQUIRE_PATH|5.0}  # [m]
+  gnss_max_plausible_speed: ${MOLA_NAVSTATE_GNSS_MAX_SPEED|50.0}  # [m/s]
+  gnss_datum_min_consistent_fixes: ${MOLA_NAVSTATE_GNSS_DATUM_MIN_FIXES|3}
+
+  # If set, the final geo-reference (datum + T_enu_to_map) is written to this YAML
+  # file (mp2p_icp georeferencing format) when the estimator is destroyed.
+  save_final_georef_to_file: "${MOLA_SE_SAVE_GEOREF_FILE|}"
 
   # If estimate_geo_reference is false and this is set, the geo-referencing will be taken
   # from this value and never attempted to be optimized or changed.
@@ -325,6 +437,17 @@ params:
   # real-time budget can trade relinearization effort for latency.
   additional_isam2_update_steps: ${MOLA_SMOOTHER_ISAM2_EXTRA_STEPS|3}
 
+  # iSAM2 relinearization threshold for poses [m, rad]: a pose is relinearized
+  # only once its estimate moved this much from its linearization point.
+  # Coarser values leave the solution away from the optimum by more than an
+  # accurate pose source's own error. Velocities and biases use 0.1.
+  isam2_relinearize_threshold: ${MOLA_SMOOTHER_ISAM2_RELIN_THRESHOLD|0.01}
+
+  # Eliminate the newest states last, so they stay at the root of the iSAM2
+  # Bayes tree and each update and query of the current state stays cheap.
+  # Only has an effect with GTSAM 4.2.
+  isam2_newest_keys_last: ${MOLA_SMOOTHER_ISAM2_NEWEST_KEYS_LAST|true}
+
   # --------------------------------------------------------------------------
   # Sensor Input Filtering (Regex Patterns)
   # --------------------------------------------------------------------------
@@ -352,17 +475,29 @@ params:
   # 0 = disabled, which is the behavior before this key existed.
   pose_min_sample_period: ${MOLA_POSE_MIN_SAMPLE_PERIOD|0.0}
 
+  # A pose reading stamped more than this after both the previous reading of
+  # its frame_id and the newest reading of the other inputs (those that
+  # delivered readings since then) is dropped (a wrong stamp): kept, the next
+  # correct readings of that source would be dropped as out of order. After 10
+  # in a row, that source is accepted again.
+  # 0 = disabled.
+  pose_max_lead_time: ${MOLA_POSE_MAX_LEAD_TIME|0.5}
+
   # Poses in any frame other than reference_frame_name (wheel, visual, LiDAR
   # odometry, e.g. nav_msgs/Odometry topics) drift, so they are fused as a
   # chain of increments between consecutive keyframes, plus one absolute
   # factor on the first reading. The covariance such a source publishes is that
   # of its absolute dead-reckoned pose, which says nothing about one increment,
-  # so the accuracy of ONE INCREMENT is set here instead (required, > 0).
+  # so the accuracy of ONE INCREMENT is set here instead (sigma_lin >= 0,
+  # sigma_ang > 0).
   # It describes one increment, whatever it spans; put motion-dependent error
   # in the *_per_sqrt_* growth terms below, which scale with the increment.
-  # Tune them for each platform.
-  relative_pose_increment_sigma_lin: ${MOLA_REL_POSE_INCR_SIGMA_LIN|0.02}  # [m]
-  relative_pose_increment_sigma_ang: ${MOLA_REL_POSE_INCR_SIGMA_ANG|0.005}  # [rad]
+  # The defaults suit LiDAR odometry; wheel or visual odometry needs its own
+  # (e.g. 0.02 m and 0.005 rad).
+  # sigma_lin 0 = automatic: 0.1 mm while imu_preintegration is on (and available
+  # in this build), 2 cm otherwise.
+  relative_pose_increment_sigma_lin: ${MOLA_REL_POSE_INCR_SIGMA_LIN|0}  # [m]
+  relative_pose_increment_sigma_ang: ${MOLA_REL_POSE_INCR_SIGMA_ANG|1e-5}  # [rad]
 
   # Growth of the per-increment uncertainty with the size of the increment,
   # as a random walk: variance = sigma_lin^2 + k^2 * distance (and likewise
@@ -372,6 +507,11 @@ params:
   # above act as the stationary floor. 0 = disabled.
   relative_pose_increment_sigma_per_sqrt_meter: ${MOLA_REL_POSE_INCR_SIGMA_PER_SQRT_M|0.0}  # [m/sqrt(m)]
   relative_pose_increment_sigma_per_sqrt_rad: ${MOLA_REL_POSE_INCR_SIGMA_PER_SQRT_RAD|0.0}  # [rad/sqrt(rad)]
+
+  # If true, odometry-frame increments take the covariance the source publishes with
+  # each reading (right for LiDAR registration against a local map), instead of the
+  # relative_pose_increment_sigma_* values above.
+  relative_pose_increment_from_source_covariance: ${MOLA_REL_POSE_INCR_FROM_SOURCE_COV|false}
 
   # Huber m-estimator threshold for fuse_pose() factors ("map" priors and
   # odometry increments alike), in whitened units (sigmas of the covariance given for each factor,
@@ -386,8 +526,8 @@ params:
   fuse_ground_truth_label: ${MOLA_FUSE_GROUND_TRUTH|false}
 
   # Regular expression to filter GNSS (GPS) labels/topics for processing
-  # Default accepts all: ".*"
-  do_process_gnss_labels_re: ".*"
+  # (MOLA_NAVSTATE_GNSS_SENSOR_NAME is a regex too). Default accepts all: ".*"
+  do_process_gnss_labels_re: "${MOLA_NAVSTATE_GNSS_SENSOR_NAME|.*}"
 
 # ============================================================================
 # End of Configuration

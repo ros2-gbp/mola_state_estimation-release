@@ -25,6 +25,7 @@
 #include <mrpt/core/Clock.h>
 #include <mrpt/poses/CPose3DPDFGaussian.h>
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -55,8 +56,15 @@ struct Snapshot
     mrpt::Clock::time_point anchorStamp;
     NavState                anchor;
 
+    /// Low-pass-filtered twist used instead of anchor.twist to extrapolate, if
+    /// that filter is enabled. A query at anchorStamp itself is not an
+    /// extrapolation and gets anchor.twist.
+    std::optional<mrpt::math::TTwist3D> predictTwist;
+
     /// Latest estimated T_map_to_odom_i, keyed by numeric odometry frame id,
     /// plus the name<->id mapping so a query by frame name can be resolved.
+    /// The covariance is only filled in for sources without a raw pose yet
+    /// (the only case FastPredictor reads it); the mean is always valid.
     std::map<odometry_frameid_t, mrpt::poses::CPose3DPDFGaussian> frameTransforms;
     mrpt::containers::bimap<std::string, odometry_frameid_t>      frameNames;
 
@@ -70,12 +78,26 @@ struct Snapshot
     };
     std::map<odometry_frameid_t, RawSourcePose> lastRawPoseBySource;
 
+    /// Sources with enough prediction errors: their mean squared error per unit
+    /// time squared (see State::prediction_residuals).
+    std::map<odometry_frameid_t, std::array<double, 6>> predictionVarRate;
+
     /// Current georeference (fixed or estimated), if any.
     std::optional<mola::Georeferencing> geoReference;
+
+    /// The geo-reference served by get_geo_reference(): like geoReference, but
+    /// with the latest T_enu_to_map estimate even while not "converged". Used
+    /// to serve poses in the ENU frame.
+    std::optional<mola::Georeferencing> currentGeoReference;
 
     /// Whether localization has converged (mode-aware, mirrors
     /// has_converged_localization()).
     bool localizationConverged = false;
+
+    /// Whether some source has observed the position of {map} in the solved
+    /// estimate (GNSS, or a pose in {map}). Until then, with a fixed
+    /// geo-reference, it is only the position of the first odometry frame.
+    bool mapPositionObserved = false;
 };
 
 }  // namespace mola::state_estimation_smoother

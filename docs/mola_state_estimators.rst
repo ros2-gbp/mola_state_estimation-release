@@ -237,7 +237,9 @@ custom copy of the file can be used instead:
 
       Odometry sources are fused as chains of increments, whose uncertainty is set by
       ``relative_pose_increment_sigma_lin`` / ``_ang`` (env vars ``MOLA_REL_POSE_INCR_SIGMA_LIN``
-      / ``_ANG``), not by the covariance in the messages. Tune them for each platform.
+      / ``_ANG``), not by the covariance in the messages. The defaults suit LiDAR odometry
+      (``_lin`` 0 = automatic: 0.1 mm with IMU preintegration, 2 cm without); tune them for
+      other sources, e.g. 0.02 m and 0.005 rad for wheel odometry.
       See :ref:`section 3 <mola_sta_est_api>`.
 
    Key launch arguments:
@@ -460,8 +462,9 @@ taken from ``/tf`` (or from ``fixed_sensor_pose`` if ``use_fixed_sensor_pose: tr
        (default: becomes a ``CObservationRobotPose``)
      - ``fuse_pose()`` in the source's own frame (named after its label). Odometry drifts,
        so only the increments between consecutive keyframes are fused, with the uncertainty
-       set by the required parameters ``relative_pose_increment_sigma_lin`` / ``_ang``
+       set by the parameters ``relative_pose_increment_sigma_lin`` / ``_ang``
        (plus optional growth with the increment size, ``..._per_sqrt_meter`` / ``_rad``).
+       Their defaults suit LiDAR odometry; set them for wheel odometry (e.g. 0.02 m / 0.005 rad).
        The first reading adds one absolute factor, with the message covariance, to resolve
        ``T_map_to_odom_<label>``. The twist part is not used.
      - Increments between consecutive readings dead-reckon the pose between primary pose
@@ -482,9 +485,25 @@ taken from ``/tf`` (or from ``fixed_sensor_pose`` if ``use_fixed_sensor_pose: tr
      - Angular velocity (``sigma_imu_angular_velocity``). Optionally, inertial propagation
        between pose updates (``imu_propagation``).
    * - ``sensor_msgs/NavSatFix``, ``gps_msgs/GPSFix``
-     - ENU position factor with a Huber kernel (``gnss_huber_threshold``). Requires a geo-reference:
+     - ENU position factor with a robust kernel (``gnss_robust_kernel``: Huber by default, or
+       Cauchy, Geman-McClure, DCS; scale ``gnss_huber_threshold``), on the closest keyframe
+       moved to the fix time with its twist. Sigmas are floored at ``gnss_min_sigma_floor_xy``
+       and ``gnss_min_sigma_floor_z`` (``MOLA_NAVSTATE_GNSS_MIN_SIGMA_XY`` / ``_Z``, 0.10 m and
+       0.30 m by default, as in the simple estimator). Each fix must first pass admission tests
+       (accepted fix qualities, valid covariance, maximum horizontal sigma, optional height band
+       around the datum, and optionally ``gnss_max_sigma_ratio``: a horizontal sigma at most
+       that many times the lowest one in the last ``gnss_sigma_ratio_window`` seconds, for
+       receivers that keep reporting a solution while it degrades; enable it only when the
+       odometry is better than those degraded fixes) and an innovation gate against the predicted antenna position
+       (``gnss_gate_chi2``, 0 disables it); rejected fixes are logged and counted, and a run of
+       fixes that keep moving like the vehicle is reacquired after a drift. With
+       ``estimate_geo_reference``, the datum is only set after a few mutually consistent fixes.
+       Requires a geo-reference:
        either estimated (``estimate_geo_reference: true``) or fixed (``fixed_geo_reference``,
-       or given by a geo-referenced map).
+       or given by a geo-referenced map). The final one can be written to a YAML file with
+       ``save_final_georef_to_file`` (``MOLA_SE_SAVE_GEOREF_FILE``), and poses can be queried
+       in the ``enu`` frame: each one through the ``T_enu_to_map`` it was estimated with, since
+       ``map`` itself moves with respect to ``enu`` while that transform is refined.
      - Ignored unless ``gnss_enabled: true`` and a geo-reference is set; then low-sigma fixes
        nudge the position.
    * - (none: C++ or other MOLA modules, e.g. LiDAR odometry)
@@ -559,7 +578,9 @@ Algorithm:
   smoothed by a scalar Kalman filter, with process noise from
   ``sigma_random_walk_acceleration_*`` and measurement noise from each input.
 - **Prediction:** ``estimated_navstate(t)`` applies the constant velocity model from the last pose
-  (or integrates the IMU, if ``imu_propagation`` is enabled), with a diagonal covariance growing
+  (or integrates the IMU, if ``imu_propagation`` is enabled; the twist is then the inertial velocity
+  at ``t``, from the stamp of the last pose on, holding the newest IMU reading until the next one
+  arrives), with a diagonal covariance growing
   with :math:`\Delta t` since the last pose update:
 
   .. math::
@@ -610,6 +631,10 @@ the full list is in :ref:`Parameters <doxid-classmola_1_1state__estimation__simp
      - false
      - Propagate the pose between updates by integrating the IMU (gyro + accelerometer) instead
        of a constant twist.
+   * - ``imu_accel_scale``
+     - 0
+     - Multiplier taking the accelerometer readings to m/s². 0: automatic (units of g if the mean
+       norm of the first 0.5 s of valid readings is below 3).
    * - ``gnss_enabled``
      - false
      - Use low-sigma GNSS fixes (e.g. RTK) to correct position drift, given a geo-reference.

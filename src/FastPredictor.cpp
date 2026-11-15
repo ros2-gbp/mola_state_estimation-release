@@ -106,6 +106,13 @@ std::optional<NavState> FastPredictor::predict(
     // synchronous estimated_navstate()).
     NavState ret = snap->anchor;
 
+    // The filtered twist is for extrapolating; at the anchor's own stamp, the
+    // anchor's twist is the estimate.
+    if (snap->predictTwist.has_value() && std::abs(dt) > SAME_STAMP_TOLERANCE)
+    {
+        ret.twist = *snap->predictTwist;
+    }
+
     // The covariance propagation below (matrix inversions, information-form
     // conversions and Gaussian pose composition) can throw on a non
     // positive-definite covariance; estimated_navstate() delegates here directly
@@ -137,6 +144,24 @@ std::optional<NavState> FastPredictor::predict(
             auto mapPdf = extrapolate_pose_pdf(params, anchorPose, ret.twist, anchorTwistCov, dt);
             apply_pose_sigma_floor(params, mapPdf);
             ret.pose.copyFrom(mapPdf);
+            return ret;
+        }
+
+        // ENU frame: the {map} prediction through the current T_enu_to_map.
+        if (frame_id == params.enu_frame_name)
+        {
+            if (!snap->currentGeoReference ||
+                (!params.estimate_geo_reference && !snap->mapPositionObserved))
+            {
+                return std::nullopt;  // not geo-referenced (yet)
+            }
+            mrpt::poses::CPose3DPDFGaussian anchorPose;
+            anchorPose.copyFrom(ret.pose);
+            const auto mapPdf =
+                extrapolate_pose_pdf(params, anchorPose, ret.twist, anchorTwistCov, dt);
+            auto enuPdf = snap->currentGeoReference->T_enu_to_map + mapPdf;
+            apply_pose_sigma_floor(params, enuPdf);
+            ret.pose.copyFrom(enuPdf);
             return ret;
         }
 
@@ -182,8 +207,19 @@ std::optional<NavState> FastPredictor::predict(
             return std::nullopt;
         }
 
-        auto rawPdf =
-            extrapolate_pose_pdf(params, rawAnchor.pose, ret.twist, anchorTwistCov, dtPred);
+        mrpt::poses::CPose3DPDFGaussian rawPdf;
+        const auto                      itRes = snap->predictionVarRate.find(itRaw->first);
+        if (params.predict_covariance_from_residuals && itRes != snap->predictionVarRate.end())
+        {
+            rawPdf = extrapolate_pose_pdf(
+                params, rawAnchor.pose, ret.twist, twist_cov_from_residuals(itRes->second), dtPred,
+                false /* no random walk: in the residuals already */);
+        }
+        else
+        {
+            rawPdf =
+                extrapolate_pose_pdf(params, rawAnchor.pose, ret.twist, anchorTwistCov, dtPred);
+        }
         apply_pose_sigma_floor(params, rawPdf);
         ret.pose.copyFrom(rawPdf);
 

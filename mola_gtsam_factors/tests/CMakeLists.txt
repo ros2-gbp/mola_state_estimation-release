@@ -12,3 +12,38 @@ mola_add_test(
   LINK_LIBRARIES
     mola::mola_gtsam_factors
 )
+
+mola_add_test(
+  TARGET  test_imu_preintegration_body_vel_factor
+  SOURCES test_imu_preintegration_body_vel_factor.cpp
+  LINK_LIBRARIES
+    mola::mola_gtsam_factors
+)
+
+mola_add_test(
+  TARGET  test_tricycle_kinematic_factor
+  SOURCES test_tricycle_kinematic_factor.cpp
+  LINK_LIBRARIES
+    mola::mola_gtsam_factors
+)
+
+mola_add_test(
+  TARGET  test_mrpt_gtsam_compat
+  SOURCES test_mrpt_gtsam_compat.cpp
+  LINK_LIBRARIES
+    mola::mola_gtsam_factors
+)
+
+mola_add_test(
+  TARGET  test_gnss_map_enu_const_vel_factor
+  SOURCES test_gnss_map_enu_const_vel_factor.cpp
+  LINK_LIBRARIES
+    mola::mola_gtsam_factors
+)
+
+mola_add_test(
+  TARGET  test_imu_integrate_readings
+  SOURCES test_imu_integrate_readings.cpp
+  LINK_LIBRARIES
+    mola::mola_gtsam_factors
+)

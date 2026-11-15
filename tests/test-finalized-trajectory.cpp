@@ -20,6 +20,7 @@
  */
 
 #include <mola_state_estimation_smoother/StateEstimationSmoother.h>
+#include <mrpt/obs/CObservationIMU.h>
 #include <mrpt/system/os.h>
 
 #include <Eigen/Dense>  // required by mrpt's matrix accessors
@@ -104,7 +105,7 @@ void test_disabled_by_default()
     ASSERT_(!traj.has_value());
 }
 
-// With the knob on, the poses of every keyframe are kept: those already
+// With the knob on, the poses of every pose keyframe are kept: those already
 // marginalized out, at their final optimized value, plus the ones still inside
 // the window.
 void test_covers_the_whole_run()
@@ -167,6 +168,222 @@ void test_covers_the_whole_run_without_intermediate_solves()
     }
 }
 
+// IMU readings between the poses create keyframes of their own (a reading
+// usually arrives before the pose of its scan). Their attitude only comes from
+// kinematics and gravity, so they are left out: every returned stamp must be a
+// pose stamp.
+void test_imu_keyframes_left_out()
+{
+    mola::state_estimation_smoother::StateEstimationSmoother nav;
+    nav.initialize(mrpt::containers::yaml::FromText(
+        params_with(true) +
+        "    imu_min_sample_period: 0.0\n"
+        "    imu_nearby_keyframe_stamp_tolerance: 0.01\n"
+        "    imu_angular_velocity_sigma: 0.1\n"
+        "    imu_normalized_gravity_alignment_sigma: 2.0\n"));
+
+    const auto cov = mrpt::math::CMatrixDouble66(mrpt::math::CMatrixDouble66::Identity() * 1e-4);
+    for (unsigned i = 0; i < N_POSES; i++)
+    {
+        const double t = i * DT;
+        nav.fuse_pose(
+            mrpt::Clock::fromDouble(t),
+            mrpt::poses::CPose3DPDFGaussian(
+                mrpt::poses::CPose3D::FromXYZYawPitchRoll(SPEED * t, 0, 0, 0, 0, 0), cov),
+            "odom");
+
+        mrpt::obs::CObservationIMU imu;
+        imu.timestamp   = mrpt::Clock::fromDouble(t + 0.5 * DT);
+        imu.sensorLabel = "imu";
+        imu.set(mrpt::obs::IMU_X_ACC, 0.0);
+        imu.set(mrpt::obs::IMU_Y_ACC, 0.0);
+        imu.set(mrpt::obs::IMU_Z_ACC, 9.81);
+        imu.set(mrpt::obs::IMU_WX, 0.0);
+        imu.set(mrpt::obs::IMU_WY, 0.0);
+        imu.set(mrpt::obs::IMU_WZ, 0.0);
+        nav.fuse_imu(imu);
+
+        (void)nav.estimated_navstate(mrpt::Clock::fromDouble(t), "odom");
+    }
+
+    // Exactly the pose keyframes, all of them:
+    const auto traj = nav.estimated_trajectory(
+        mrpt::Clock::time_point::min(), mrpt::Clock::time_point::max(), "odom");
+    ASSERT_(traj.has_value());
+    ASSERT_EQUAL_(traj->size(), N_POSES);
+    unsigned i = 0;
+    for (const auto& [t, p] : *traj)
+    {
+        ASSERT_NEAR_(mrpt::Clock::toDouble(t), i * DT, 1e-6);
+        i++;
+    }
+}
+
+// A pose arriving within min_time_difference_to_create_new_frame of an IMU
+// keyframe reuses it: that keyframe holds the pose and is exported, at the
+// stamp of the IMU reading that created it.
+void test_reused_imu_keyframes_kept()
+{
+    mola::state_estimation_smoother::StateEstimationSmoother nav;
+    nav.initialize(mrpt::containers::yaml::FromText(
+        params_with(true) +
+        "    imu_min_sample_period: 0.0\n"
+        "    imu_nearby_keyframe_stamp_tolerance: 0.01\n"
+        "    imu_angular_velocity_sigma: 0.1\n"
+        "    imu_normalized_gravity_alignment_sigma: 2.0\n"));
+
+    constexpr double T0     = 1.0;
+    constexpr double IMU_DT = 0.005;
+    const auto cov = mrpt::math::CMatrixDouble66(mrpt::math::CMatrixDouble66::Identity() * 1e-4);
+    for (unsigned i = 0; i < N_POSES; i++)
+    {
+        const double t = T0 + i * DT;
+
+        mrpt::obs::CObservationIMU imu;
+        imu.timestamp   = mrpt::Clock::fromDouble(t - IMU_DT);
+        imu.sensorLabel = "imu";
+        imu.set(mrpt::obs::IMU_X_ACC, 0.0);
+        imu.set(mrpt::obs::IMU_Y_ACC, 0.0);
+        imu.set(mrpt::obs::IMU_Z_ACC, 9.81);
+        imu.set(mrpt::obs::IMU_WX, 0.0);
+        imu.set(mrpt::obs::IMU_WY, 0.0);
+        imu.set(mrpt::obs::IMU_WZ, 0.0);
+        nav.fuse_imu(imu);
+
+        nav.fuse_pose(
+            mrpt::Clock::fromDouble(t),
+            mrpt::poses::CPose3DPDFGaussian(
+                mrpt::poses::CPose3D::FromXYZYawPitchRoll(SPEED * (t - T0), 0, 0, 0, 0, 0), cov),
+            "odom");
+
+        (void)nav.estimated_navstate(mrpt::Clock::fromDouble(t), "odom");
+    }
+
+    // Every pose, at the stamp of the IMU keyframe it reused:
+    const auto traj = nav.estimated_trajectory(
+        mrpt::Clock::time_point::min(), mrpt::Clock::time_point::max(), "odom");
+    ASSERT_(traj.has_value());
+    ASSERT_EQUAL_(traj->size(), N_POSES);
+    unsigned i = 0;
+    for (const auto& [t, p] : *traj)
+    {
+        ASSERT_NEAR_(mrpt::Clock::toDouble(t), T0 + i * DT - IMU_DT, 1e-6);
+        i++;
+    }
+}
+
+// A reset() mid-run, as a front end does after a divergence, must not leave a
+// gap: the keyframes still in the window are recorded as final, and the poses
+// fused after it continue the trajectory.
+void test_reset_keeps_the_window()
+{
+    mola::state_estimation_smoother::StateEstimationSmoother nav;
+    nav.initialize(mrpt::containers::yaml::FromText(params_with(true)));
+
+    const auto cov = mrpt::math::CMatrixDouble66(mrpt::math::CMatrixDouble66::Identity() * 1e-4);
+    constexpr unsigned RESET_AT = N_POSES / 2;
+    for (unsigned i = 0; i < N_POSES; i++)
+    {
+        if (i == RESET_AT)
+        {
+            nav.reset();
+        }
+        const double t = i * DT;
+        const auto   p =
+            mrpt::poses::CPose3D::FromXYZYawPitchRoll(SPEED * t, 0, 0, 0.0_deg, 0.0_deg, 0.0_deg);
+        nav.fuse_pose(mrpt::Clock::fromDouble(t), mrpt::poses::CPose3DPDFGaussian(p, cov), "odom");
+        (void)nav.estimated_navstate(mrpt::Clock::fromDouble(t), "odom");
+    }
+
+    const auto traj = nav.estimated_trajectory(
+        mrpt::Clock::time_point::min(), mrpt::Clock::time_point::max(), "odom");
+    ASSERT_(traj.has_value());
+
+    // No hole around the reset: consecutive stamps are at most one input step
+    // apart (1 s of window, 10 keyframes, would be missing otherwise).
+    double prevT = -1;
+    for (const auto& [t, p] : *traj)
+    {
+        const double tt = mrpt::Clock::toDouble(t);
+        if (prevT >= 0)
+        {
+            ASSERT_LT_(tt - prevT, 1.5 * DT);
+        }
+        ASSERT_NEAR_(p.x, SPEED * tt, 0.05);
+        prevT = tt;
+    }
+    // From the first pose to the last one:
+    ASSERT_NEAR_(mrpt::Clock::toDouble(traj->begin()->first), 0.0, 1e-6);
+    ASSERT_GT_(mrpt::Clock::toDouble(traj->rbegin()->first), (RESET_AT + 1) * DT);
+}
+
+// With the first pose linked to the {map} origin, a reset_motion() mid-run
+// must not link the first keyframe after it there too: earlier poses (in {map}
+// or in an odometry frame) already placed the vehicle elsewhere, and the
+// estimate must stay with them. A full reset() starts from scratch instead: the
+// first pose after it is linked to the origin again, as needed when the front
+// end redefines its frame.
+void test_reset_mid_run(
+    bool keepFrames, const std::string& poseFrame, bool newSource = false, bool twice = false)
+{
+    mola::state_estimation_smoother::StateEstimationSmoother nav;
+    nav.initialize(mrpt::containers::yaml::FromText(
+        params_with(true) + "    link_first_pose_to_reference_origin_sigma: 1e-6\n"));
+
+    const auto cov = mrpt::math::CMatrixDouble66(mrpt::math::CMatrixDouble66::Identity() * 1e-4);
+    constexpr unsigned RESET_AT = N_POSES / 2;
+    for (unsigned i = 0; i < N_POSES; i++)
+    {
+        if (i == RESET_AT)
+        {
+            if (keepFrames)
+            {
+                nav.reset_motion();
+                if (twice)
+                {
+                    // No solve in between: what was kept is not trusted.
+                    nav.reset_motion();
+                }
+            }
+            else
+            {
+                nav.reset();
+            }
+        }
+        const double t = i * DT;
+        // In {map}, which the first pose defines, the vehicle moves along its x
+        // axis. An odometry frame starts elsewhere, so it is rotated and offset
+        // with respect to {map}:
+        const auto inMap =
+            mrpt::poses::CPose3D::FromXYZYawPitchRoll(SPEED * t, 0, 0, 0.0_deg, 0.0_deg, 0.0_deg);
+        const auto odomStart =
+            mrpt::poses::CPose3D::FromXYZYawPitchRoll(5.0, -3.0, 0.5, 30.0_deg, 2.0_deg, -1.5_deg);
+        const auto p = poseFrame == "map" ? inMap : odomStart + inMap;
+        // A source that only starts after the reset, ahead of the kept one, in
+        // a frame of its own: it must not redefine {map}.
+        if (newSource && i >= RESET_AT)
+        {
+            const auto otherStart = mrpt::poses::CPose3D::FromXYZYawPitchRoll(
+                100.0, 50.0, 0.0, 90.0_deg, 0.0_deg, 0.0_deg);
+            nav.fuse_pose(
+                mrpt::Clock::fromDouble(t),
+                mrpt::poses::CPose3DPDFGaussian(otherStart + inMap, cov), "other_odom");
+        }
+        nav.fuse_pose(
+            mrpt::Clock::fromDouble(t), mrpt::poses::CPose3DPDFGaussian(p, cov), poseFrame);
+        const auto ns = nav.estimated_navstate(mrpt::Clock::fromDouble(t), "map");
+        if (i > RESET_AT + 1)
+        {
+            const double expectedX = keepFrames && !twice ? SPEED * t : SPEED * (t - RESET_AT * DT);
+            ASSERT_(ns.has_value());
+            ASSERT_NEAR_(ns->pose.mean.x(), expectedX, 0.05);
+            ASSERT_NEAR_(ns->pose.mean.y(), 0.0, 0.05);
+            ASSERT_NEAR_(ns->pose.mean.z(), 0.0, 0.05);
+            ASSERT_NEAR_(ns->twist.vx, SPEED, 0.2);
+        }
+    }
+}
+
 // An unknown frame cannot be served, and must not be silently answered in the
 // reference frame.
 void test_unknown_frame()
@@ -187,6 +404,15 @@ int main(int argc, char** argv)
         {"covers_the_whole_run", &test_covers_the_whole_run},
         {"covers_the_whole_run_without_intermediate_solves",
          &test_covers_the_whole_run_without_intermediate_solves},
+        {"imu_keyframes_left_out", &test_imu_keyframes_left_out},
+        {"reused_imu_keyframes_kept", &test_reused_imu_keyframes_kept},
+        {"reset_keeps_the_window", &test_reset_keeps_the_window},
+        {"reset_motion_keeps_frames", [] { test_reset_mid_run(true, "map"); }},
+        {"reset_motion_keeps_frames_odom", [] { test_reset_mid_run(true, "odom"); }},
+        {"reset_motion_keeps_frames_new_source", [] { test_reset_mid_run(true, "odom", true); }},
+        {"reset_motion_twice_without_solve_is_full",
+         [] { test_reset_mid_run(true, "odom", false, true); }},
+        {"full_reset_redefines_frames", [] { test_reset_mid_run(false, "odom"); }},
         {"unknown_frame", &test_unknown_frame},
     };
 

@@ -1,4 +1,0 @@
-# Requisites for the clang-format linter script
-argparse
-colorlog
-clang-format==14.0.6

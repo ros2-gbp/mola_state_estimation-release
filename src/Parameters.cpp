@@ -38,6 +38,7 @@ void Parameters::loadFrom(const mrpt::containers::yaml& cfg)
     MCP_LOAD_OPT(cfg, publish_fused_vehicle_tf);
     MCP_LOAD_OPT(cfg, fused_vehicle_frame_name);
     MCP_LOAD_OPT(cfg, publish_imu_yaw_bias);
+    MCP_LOAD_OPT(cfg, publish_gnss_bias);
     MCP_LOAD_OPT(cfg, publish_imu_biases);
     MCP_LOAD_OPT(cfg, publish_georef_convergence);
 
@@ -136,6 +137,13 @@ void Parameters::loadFrom(const mrpt::containers::yaml& cfg)
         auto&                        ip = imu_preintegration;
         ip.enabled                      = c.getOrDefault("enabled", ip.enabled);
         ip.sensor_label_re              = c.getOrDefault("sensor_label_re", ip.sensor_label_re);
+        ip.gyro_only                    = c.getOrDefault("gyro_only", ip.gyro_only);
+        ip.max_imus                     = c.getOrDefault("max_imus", ip.max_imus);
+        ASSERT_GE_(ip.max_imus, 1);
+        ASSERT_LE_(ip.max_imus, 3);
+        ASSERTMSG_(
+            ip.max_imus == 1 || ip.gyro_only,
+            "imu_preintegration.max_imus > 1 requires imu_preintegration.gyro_only");
         ip.gyro_noise_density  = c.getOrDefault("gyro_noise_density", ip.gyro_noise_density);
         ip.accel_noise_density = c.getOrDefault("accel_noise_density", ip.accel_noise_density);
         ip.gyro_bias_random_walk =
@@ -160,6 +168,8 @@ void Parameters::loadFrom(const mrpt::containers::yaml& cfg)
         ASSERT_GT_(ip.accel_noise_density, 0.0);
         ASSERT_GT_(ip.gyro_bias_random_walk, 0.0);
         ASSERT_GT_(ip.accel_bias_random_walk, 0.0);
+        ASSERT_GT_(ip.initial_gyro_bias_sigma, 0.0);
+        ASSERT_GT_(ip.initial_accel_bias_sigma, 0.0);
         ASSERT_GE_(ip.linear_kinematics_sigma_scale, 1.0);
         ASSERT_GE_(ip.accel_scale, 0.0);
     }
@@ -186,6 +196,8 @@ void Parameters::loadFrom(const mrpt::containers::yaml& cfg)
     MCP_LOAD_OPT(cfg, gnss_gate_reacquire_after);
     MCP_LOAD_OPT(cfg, gnss_gate_reacquire_min_path);
     ASSERT_GE_(gnss_gate_reacquire_min_path, 0.0);
+    MCP_LOAD_OPT(cfg, gnss_gate_reacquire_max_sigma);
+    ASSERT_GE_(gnss_gate_reacquire_max_sigma, 0.0);
     MCP_LOAD_OPT(cfg, gnss_max_plausible_speed);
     MCP_LOAD_OPT(cfg, gnss_datum_min_consistent_fixes);
     ASSERT_GE_(gnss_max_horizontal_sigma, 0.0);
@@ -204,6 +216,19 @@ void Parameters::loadFrom(const mrpt::containers::yaml& cfg)
     MCP_LOAD_OPT(cfg, gnss_min_sigma_floor_z);
     ASSERT_GE_(gnss_min_sigma_floor_xy, 0.0);
     ASSERT_GE_(gnss_min_sigma_floor_z, 0.0);
+    MCP_LOAD_OPT(cfg, gnss_bias_sigma_xy);
+    MCP_LOAD_OPT(cfg, gnss_bias_sigma_z);
+    MCP_LOAD_OPT(cfg, gnss_bias_time_constant);
+    MCP_LOAD_OPT(cfg, gnss_bias_labels_re);
+    MCP_LOAD_OPT(cfg, gnss_bias_white_sigma_xy);
+    MCP_LOAD_OPT(cfg, gnss_bias_white_sigma_z);
+    ASSERT_GE_(gnss_bias_white_sigma_xy, 0.0);
+    ASSERT_GE_(gnss_bias_white_sigma_z, 0.0);
+    MCP_LOAD_OPT(cfg, gnss_bias_restart_sigmas);
+    ASSERT_GE_(gnss_bias_restart_sigmas, 0.0);
+    ASSERT_GE_(gnss_bias_sigma_xy, 0.0);
+    ASSERT_GE_(gnss_bias_sigma_z, 0.0);
+    ASSERT_GT_(gnss_bias_time_constant, 0.0);
     MCP_LOAD_OPT(cfg, save_final_georef_to_file);
     MCP_LOAD_OPT(cfg, estimate_geo_reference);
 
@@ -230,6 +255,8 @@ void Parameters::loadFrom(const mrpt::containers::yaml& cfg)
     MCP_LOAD_OPT(cfg, convergence_max_position_sigma);
     MCP_LOAD_OPT(cfg, convergence_max_orientation_sigma_deg);
     MCP_LOAD_OPT(cfg, publish_estimated_georef_on_convergence);
+    MCP_LOAD_OPT(cfg, georef_track_after_convergence);
+    MCP_LOAD_OPT(cfg, georef_convergence_in_enu);
 
     MCP_LOAD_REQ(cfg, kinematic_model);
 
@@ -251,6 +278,7 @@ void Parameters::loadFrom(const mrpt::containers::yaml& cfg)
     MCP_LOAD_OPT(cfg, relative_pose_increment_sigma_per_sqrt_meter);
     MCP_LOAD_OPT(cfg, relative_pose_increment_sigma_per_sqrt_rad);
     MCP_LOAD_OPT(cfg, pose_robust_huber_threshold);
+    MCP_LOAD_OPT(cfg, odometry_robust_huber_threshold);
     MCP_LOAD_OPT(cfg, relative_pose_increment_from_source_covariance);
     MCP_LOAD_OPT(cfg, do_process_gnss_labels_re);
 
@@ -261,11 +289,6 @@ void Parameters::loadFrom(const mrpt::containers::yaml& cfg)
         "relative_pose_increment_sigma_lin must be >= 0 (0: automatic) and "
         "relative_pose_increment_sigma_ang > 0: they define the uncertainty of "
         "each increment of an odometry source fused with fuse_pose()");
-    if (relative_pose_increment_sigma_lin == 0)
-    {
-        // The tight value pays off only together with IMU preintegration:
-        relative_pose_increment_sigma_lin = imu_preintegration.enabled ? 1e-4 : 0.02;
-    }
     ASSERTMSG_(
         relative_pose_increment_sigma_per_sqrt_meter >= 0 &&
             relative_pose_increment_sigma_per_sqrt_rad >= 0,

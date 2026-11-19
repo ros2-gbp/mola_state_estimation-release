@@ -5,7 +5,7 @@
 -->
 <package format="3">
   <name>mola_state_estimation_smoother</name>
-  <version>3.3.0</version>
+  <version>3.4.0</version>
   <description>SE(3) pose and twist path data fusion estimator</description>
 
   <maintainer email="joseluisblancoc@gmail.com">Jose-Luis Blanco-Claraco</maintainer>
@@ -62,7 +62,7 @@
   <test_depend>tf2_ros</test_depend>
   <test_depend>mola_launcher</test_depend>
   <test_depend>ament_cmake_pytest</test_depend>
-  <test_depend>mola_bridge_ros2</test_depend>
+  <exec_depend version_gte="3.6.0">mola_bridge_ros2</exec_depend> <!-- per-topic odometry_as_robot_pose_observation -->
 
   <doc_depend>doxygen</doc_depend>
 

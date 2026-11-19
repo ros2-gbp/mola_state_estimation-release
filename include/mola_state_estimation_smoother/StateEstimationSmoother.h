@@ -46,6 +46,8 @@
 #include <mrpt/containers/bimap.h>
 #include <mrpt/containers/yaml.h>
 #include <mrpt/core/pimpl.h>
+#include <mrpt/math/CMatrixFixed.h>
+#include <mrpt/math/TPoint2D.h>
 #include <mrpt/math/TPoint3D.h>
 #include <mrpt/obs/CObservationGPS.h>
 #include <mrpt/obs/CObservationIMU.h>
@@ -72,6 +74,11 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+namespace gtsam
+{
+class Values;
+}
 
 namespace mola::state_estimation_smoother
 {
@@ -268,14 +275,20 @@ class StateEstimationSmoother : public mola::NavStateFilter,
         size_t rejected_admission   = 0;  //!< quality, covariance, sigma, height
         size_t rejected_innovation  = 0;  //!< innovation gate or fix-to-fix consistency
         size_t consecutive_rejected = 0;  //!< current run of rejections
-        size_t reacquired           = 0;  //!< runs accepted after gnss_gate_reacquire_after
-        size_t datum_restarts       = 0;  //!< datum candidates dropped as inconsistent
+        size_t reacquired = 0;  //!< rejected fixes accepted again (see gnss_gate_reacquire_*)
+        size_t reacquired_by_continuity = 0;  //!< of them, by gnss_gate_reacquire_max_sigma
+        size_t datum_restarts           = 0;  //!< datum candidates dropped as inconsistent
+        size_t bias_restarts = 0;  //!< GNSS bias chains restarted (gnss_bias_restart_sigmas)
     };
     [[nodiscard]] GnssGateStats gnss_gate_stats() const;
 
     /// Number of fuse_pose() readings dropped for being stamped ahead of the
     /// other inputs (see Parameters::pose_max_lead_time).
     [[nodiscard]] size_t pose_lead_drops() const;
+
+    /// Number of solves that failed (e.g. an ill-conditioned graph) and reset
+    /// the smoother, since construction.
+    [[nodiscard]] size_t solve_failures() const { return solveFailures_.load(); }
 
     /** Integrates new twist estimation (in the odom frame) */
     void fuse_twist(
@@ -326,6 +339,19 @@ class StateEstimationSmoother : public mola::NavStateFilter,
      *  A reading's ENU yaw is the true one plus this bias. */
     [[nodiscard]] std::optional<std::pair<double, double>> estimated_imu_yaw_bias() const;
 
+    /// A GNSS receiver bias estimate (see Parameters::gnss_bias_sigma_xy)
+    struct GnssBiasEstimate
+    {
+        mrpt::math::TPoint3D        mean;  //!< ENU axes [m]
+        mrpt::math::CMatrixDouble33 cov;  //!< [m^2]
+    };
+
+    /** Gets the latest estimated GNSS receiver biases, by sensor label: a fix is the true
+     *  antenna position plus the bias (plus white noise). Empty for receivers without a bias
+     *  state (`gnss_bias_sigma_xy` = 0, or a label not matching `gnss_bias_labels_re`) or
+     *  not solved yet. */
+    [[nodiscard]] std::map<std::string, GnssBiasEstimate> estimated_gnss_biases() const;
+
     /// Gets the latest estimated transform of "T_map_to_odometry_frame_i", by frame ID name.
     [[nodiscard]] std::optional<mrpt::poses::CPose3DPDFGaussian> estimated_T_map_to_odometry_frame(
         const std::string& frame_id) const;
@@ -359,6 +385,11 @@ class StateEstimationSmoother : public mola::NavStateFilter,
      */
     [[nodiscard]] std::set<std::pair<mrpt::Clock::time_point, mrpt::Clock::time_point>>
         const_vel_factor_links_for_testing() const;
+
+    /** The linear sigma of the next odometry-frame increment: the configured
+     *  relative_pose_increment_sigma_lin, or, if 0 (automatic), 0.1 mm once an IMU
+     *  is being preintegrated (not gyro_only) and 2 cm otherwise. */
+    [[nodiscard]] double relative_pose_increment_sigma_lin_in_use() const;
 
     /** @} */
 
@@ -574,8 +605,10 @@ class StateEstimationSmoother : public mola::NavStateFilter,
             /// A fix as a geocentric point, for fix-to-fix consistency tests.
             struct Fix
             {
-                mrpt::math::TPoint3D              ecef;
-                double                            sigma = 0;  //!< isotropic [m]
+                mrpt::math::TPoint3D ecef;
+                double               sigma = 0;  //!< isotropic [m]
+                /// Its receiver's bias sigma (GNSS bias states), else 0 [m]
+                double                            biasSigma = 0;
                 mrpt::Clock::time_point           t;
                 mrpt::topography::TGeodeticCoords geo;
             };
@@ -600,9 +633,13 @@ class StateEstimationSmoother : public mola::NavStateFilter,
             std::optional<mrpt::math::TPoint3D> runStartPredEnu;
 
             // Prediction uncertainty model:
-            double                              postSigma         = -1;  //!< < 0: not initialized
-            double                              pathSinceAccepted = 0;  //!< [m]
-            std::optional<mrpt::math::TPoint3D> lastPredictedAntenna;  //!< in {map}
+            double postSigma = -1;  //!< < 0: not initialized
+            /// With GNSS bias states: the variances of the vehicle position in {enu}
+            /// as of the last solve (joint marginal)
+            std::optional<std::array<double, 3>> solvedEnuPosVar;  //!< E, N, U [m^2]
+            std::optional<double>                solvedEnuPosSigmaStamp;  //!< its key stamp [s]
+            double                               pathSinceAccepted = 0;  //!< [m]
+            std::optional<mrpt::math::TPoint3D>  lastPredictedAntenna;  //!< in {map}
 
             /// With a fixed geo-reference: the vehicle position has converged
             /// (sticky), so there is a prediction worth gating against.
@@ -611,6 +648,26 @@ class StateEstimationSmoother : public mola::NavStateFilter,
             /// After a reacquisition, the gate stays open while the estimate
             /// catches up with the fixes.
             bool reacquiring = false;
+
+            /// Horizontal residuals (fix minus prediction, ENU) of the last
+            /// precise fixes, while they change smoothly from fix to fix.
+            struct ResidualChain
+            {
+                mrpt::math::TPoint2D    residual;  //!< of the last fix [m]
+                mrpt::math::TPoint3D    antenna;  //!< its antenna position on the vehicle
+                mrpt::math::TPoint3D    predEnu;  //!< its predicted antenna position
+                mrpt::Clock::time_point t;
+                double                  sigma   = 0;  //!< its horizontal sigma [m]
+                size_t                  precise = 0;  //!< fixes since it was anchored
+                size_t sinceAnchor              = 0;  //!< fixes since its last anchor (included)
+                bool   anchored = false;  //!< a fix of it was within the nominal gate
+                /// Residual and sigma of its last fix within the nominal gate:
+                mrpt::math::TPoint2D anchorResidual;
+                double               anchorSigma = 0;
+                /// Predicted path since then (including the estimate own corrections) [m]
+                double pathOutOfGate = 0;
+            };
+            std::optional<ResidualChain> residualChain;
         };
         GnssGate gnssGate;
 
@@ -621,6 +678,7 @@ class StateEstimationSmoother : public mola::NavStateFilter,
         RegexCache do_process_imu_labels_re;
         RegexCache do_process_odometry_labels_re;
         RegexCache do_process_gnss_labels_re;
+        RegexCache gnss_bias_labels_re;
     };
 
     State      state_;
@@ -630,6 +688,10 @@ class StateEstimationSmoother : public mola::NavStateFilter,
     /// mutex so readers never wait for a solve holding stateMutex_.
     std::optional<std::pair<double, double>> lastYawBias_;
     mutable std::mutex                       lastYawBiasMutex_;
+
+    /// Copy of the latest solved GNSS receiver biases, by sensor label, with its own mutex.
+    std::map<std::string, GnssBiasEstimate> lastGnssBiases_;
+    mutable std::mutex                      lastGnssBiasesMutex_;
 
     /// Latest geo-reference convergence state (see publish_georef_convergence).
     struct GeorefConvergence
@@ -671,6 +733,8 @@ class StateEstimationSmoother : public mola::NavStateFilter,
     };
     InputStamps        inputStamps_;
     mutable std::mutex inputStampsMutex_;
+
+    std::atomic<size_t> solveFailures_{0};  //!< see solve_failures()
 
 #if defined(MOLA_SMOOTHER_HAS_IMU_BIAS_SOURCE)
     /// IMU bias tracking (imu_bias_tracking), with its own mutex: fed from the raw
@@ -841,6 +905,15 @@ class StateEstimationSmoother : public mola::NavStateFilter,
 
     /// Some measurement now observes {map}: its gauge anchor is no longer needed.
     void mark_map_observed_locked();
+    /// Some measurement now observes the position of {map} (not just its
+    /// orientation): the odometry frame anchor stops pinning it.
+    void mark_map_position_observed_locked();
+    /// The link_first_pose_to_reference_origin_sigma pin, if any: on the first
+    /// keyframe, moved once to the first one with a pose or odometry reading
+    /// (`poseReading`) if the first had none, while it is not marginalized, so
+    /// that the odometry chains do not hang from it only through the kinematic
+    /// factors (e.g. IMU readings ahead of the first pose).
+    void pin_first_pose_locked(frame_index_t kf, bool poseReading);
 
     /// False while a fixed geo-reference is set but no source has observed the
     /// position of {map} yet (it is only the first odometry frame then). Runs a pending
@@ -849,9 +922,9 @@ class StateEstimationSmoother : public mola::NavStateFilter,
     [[nodiscard]] bool reference_frame_position_observed();
     /// A source observes the vehicle roll/pitch and/or yaw in {map}
     void mark_orientation_observed_locked(bool rollPitch, bool yaw);
-    /// Replaces the orientation entries of a pose covariance that only a gauge
-    /// anchor pins (not observed) with "unknown" ones
-    void inflate_pinned_orientation_cov_locked(mrpt::math::CMatrixDouble66& cov) const;
+    /// Replaces the position and orientation entries of a pose covariance that
+    /// only a gauge anchor pins (not observed) with "unknown" ones
+    void inflate_pinned_cov_locked(mrpt::math::CMatrixDouble66& cov) const;
 
     // ---- _locked variants: assume stateMutex_ is already held by the caller ----
     /// keepFrames: see reset_motion().
@@ -872,6 +945,18 @@ class StateEstimationSmoother : public mola::NavStateFilter,
     void fuse_imu_locked(const mrpt::obs::CObservationIMU& imu);
     /// Creates the yaw bias variable of keyframe `kf`, if it does not exist yet
     void add_imu_yaw_bias_variable_locked(frame_index_t kf);
+    /** The bias variable of GNSS receiver `label` at keyframe `kf`, created (and chained
+     *  to the previous one) if it does not exist yet; empty if that receiver has no bias
+     *  state. */
+    std::optional<uint64_t> gnss_bias_variable_locked(const std::string& label, frame_index_t kf);
+    /** The bias chain (index in gnss_bias_key()) of receiver `label`, created on first
+     *  use; empty if it has no bias state (Parameters::gnss_bias_sigma_xy and
+     *  gnss_bias_labels_re), including when all chains are taken. */
+    std::optional<size_t> gnss_bias_chain_locked(const std::string& label);
+    /** The bias of receiver `label` expected at time `t` (the stationary prior until its
+     *  chain is solved), or empty if it has no bias state. */
+    std::optional<GnssBiasEstimate> predicted_gnss_bias_locked(
+        const std::string& label, const mrpt::Clock::time_point& t);
     void fuse_gnss_locked(const mrpt::obs::CObservationGPS& gps);
     void fuse_twist_locked(
         const mrpt::Clock::time_point& timestamp, const mrpt::math::TTwist3D& twist,
@@ -955,6 +1040,8 @@ class StateEstimationSmoother : public mola::NavStateFilter,
      */
     /// IMU preintegration: keeps the raw readings of the IMU in use.
     void buffer_raw_imu_locked(const mrpt::obs::CObservationIMU& imu);
+    /// IMUs after the first one (imu_preintegration.max_imus > 1)
+    void buffer_extra_gyro_locked(const mrpt::obs::CObservationIMU& imu);
 
     /// IMU preintegration: before T_enu_to_map reaches the solver, sets its
     /// roll and pitch from the accelerometer, so a tilted {map} starts right.
@@ -964,6 +1051,15 @@ class StateEstimationSmoother : public mola::NavStateFilter,
     /// (link_first_pose_to_reference_origin_sigma), which only holds until a
     /// pose has defined {map}.
     bool link_first_pose_to_origin() const;
+    /// Number of IMU bias variable chains (0 without preintegration)
+    size_t num_imu_bias_chains() const;
+    /// Position [m] and orientation [deg] sigmas of the vehicle pose in {enu} at
+    /// keyframe `kf`, from the joint marginal of T_enu_to_map and its pose, and
+    /// optionally the position variances along E, N, U [m^2].
+    std::optional<std::pair<double, double>> vehicle_enu_sigmas_locked(
+        const gtsam::Values& values, frame_index_t kf,
+        std::array<double, 3>* posVarEnu = nullptr) const;
+    double relative_pose_increment_sigma_lin_locked() const;
     /// Pins {map} to the first odometry frame, if nothing anchors it yet.
     void anchor_map_to_first_odom_frame_locked();
 
@@ -980,6 +1076,7 @@ class StateEstimationSmoother : public mola::NavStateFilter,
     /// IMU preintegration: adds the factor of every link whose interval the
     /// raw readings now cover.
     void attach_imu_factors_locked();
+    void attach_extra_gyro_factors_locked();
 
     void remove_kinematic_factor_between(const frame_index_t from, const frame_index_t to);
 

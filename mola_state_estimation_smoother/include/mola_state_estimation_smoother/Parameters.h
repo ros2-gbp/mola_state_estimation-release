@@ -28,9 +28,14 @@
 #include <mrpt/typemeta/TEnumType.h>
 
 /// With a fixed geo-reference, an orientation that only position sources
-/// (e.g. GNSS without IMU) observe is held fixed and reported as unknown,
-/// instead of leaving the solver indeterminate:
+/// (e.g. GNSS without IMU) observe, or a position that only absolute attitude
+/// observes, is held fixed and reported as unknown, instead of leaving the
+/// solver indeterminate:
 #define MOLA_STATE_ESTIMATION_SMOOTHER_HAS_ORIENTATION_GAUGE 1
+
+/// GNSS receiver bias states (Parameters::gnss_bias_sigma_xy) and
+/// StateEstimationSmoother::estimated_gnss_biases():
+#define MOLA_STATE_ESTIMATION_SMOOTHER_HAS_GNSS_BIAS 1
 
 namespace mola::state_estimation_smoother
 {
@@ -120,6 +125,12 @@ class Parameters
      * `mola_diagnostics/<module>/imu_yaw_bias_deg` and `.../imu_yaw_bias_sigma_deg`).
      * Default off. */
     bool publish_imu_yaw_bias = false;
+
+    /** If true, publish the estimated GNSS receiver biases (see `gnss_bias_sigma_xy`) as
+     * module diagnostics, once per diagnostics period: `gnss_bias_<label>_{e,n,u}_m` and
+     * `gnss_bias_<label>_sigma_m` (largest horizontal sigma), with the label's
+     * non-alphanumeric characters replaced by `_`. Default off. */
+    bool publish_gnss_bias = false;
 
     /** If true (and `imu_bias_tracking`), publish the gyroscope bias of each tracked IMU as
      * module diagnostics, once per diagnostics period: `imu_bias_<label>_gyro_{x,y,z}_deg_s`
@@ -306,8 +317,10 @@ class Parameters
      * relative_pose_increment_sigma_per_sqrt_meter, which scales with the
      * increment and so with pose_min_sample_period. [m]
      *
-     * 0 (default) = automatic, set by loadFrom(): 0.1 mm while IMU preintegration
-     * is enabled, 2 cm otherwise. Both values, and
+     * 0 (default) = automatic, chosen per increment: 0.1 mm once an IMU is
+     * being preintegrated (not gyro_only), 2 cm otherwise (e.g. no IMU at all).
+     * See StateEstimationSmoother::relative_pose_increment_sigma_lin_in_use().
+     * Both values, and
      * the default relative_pose_increment_sigma_ang, suit LiDAR odometry; wheel
      * or visual odometry needs its own (e.g. 2 cm and 5 mrad).
      */
@@ -342,6 +355,12 @@ class Parameters
      * reading whose keyframe starts far from it. The one-time anchor factor
      * of a relative source is not wrapped. 0 disables it. */
     double pose_robust_huber_threshold = 0.0;
+
+    /** As pose_robust_huber_threshold, for the increments of wheel odometry
+     * (fuse_odometry()), in sigmas of its motion model: lost encoder counts or
+     * wheel slip then pull with bounded weight against GNSS and gyroscopes.
+     * 0 disables it. */
+    double odometry_robust_huber_threshold = 0.0;
 
     /** @} */
 
@@ -449,10 +468,12 @@ class Parameters
 
     bool enforce_planar_motion = false;
 
-    /** If set, the first ever frame will also have an SE(3) edge favoring it to be the identity in
-     * the "reference_frame", with a sigma given by this value. Use a small number, like 1e-6, for
-     * initialing the first odometry pose near the map origin. Do not set when using geo-referenced
-     * maps.
+    /** If set, the first keyframe will also have an SE(3) edge favoring it to be
+     * the identity in the "reference_frame", with a sigma given by this value. If
+     * that keyframe has no pose or odometry reading (e.g. IMU readings arrived
+     * first), the edge moves once to the first keyframe that has one. Use a small
+     * number, like 1e-6, for initializing the first pose near the map origin. Do
+     * not set when using geo-referenced maps.
      */
     std::optional<double> link_first_pose_to_reference_origin_sigma;
 
@@ -578,6 +599,21 @@ class Parameters
         bool        enabled         = true;
         std::string sensor_label_re = ".*";  //!< IMUs used (regex of labels)
 
+        /** If true, only the gyroscope is preintegrated: each link gets a
+         * rotation-only factor (gtsam AHRS preintegration, with the gyro bias
+         * of the same bias variables), and the accelerometer is not used for
+         * it, nor are the linear kinematic factors weakened. For vehicles
+         * whose accelerometer is too disturbed (vibration) to integrate, while
+         * their gyroscope still observes rotation far better than LiDAR or
+         * wheel odometry in some scenes (e.g. a degenerate LiDAR scene). */
+        bool gyro_only = false;
+
+        /** With gyro_only, how many IMUs matching sensor_label_re are
+         * preintegrated (1 to 3), each with its own gyro bias variables, in the
+         * order they are first seen. Several gyroscopes keep the rotation
+         * observed when one of them stops (e.g. a LiDAR with a built-in IMU). */
+        int max_imus = 1;
+
         double gyro_noise_density     = 2.4e-4;  //!< [rad/s/sqrt(Hz)]
         double accel_noise_density    = 1.6e-3;  //!< [m/s^2/sqrt(Hz)]
         double gyro_bias_random_walk  = 2e-5;  //!< [rad/s^2/sqrt(Hz)]
@@ -590,6 +626,10 @@ class Parameters
          * since some drivers publish them in units of g. */
         double accel_scale = 0;
 
+        /** Prior of the first bias variable. One thousandth of each is also the
+         * floor of the sigma of one bias random-walk link: over short links
+         * (closely spaced keyframes) a stiffer chain cannot be factored
+         * reliably. Must be > 0. */
         double initial_gyro_bias_sigma  = 0.02;  //!< [rad/s]
         double initial_accel_bias_sigma = 0.2;  //!< [m/s^2]
 
@@ -659,6 +699,23 @@ class Parameters
      *  will publish the estimated geo-referencing via MapSourceBase.
      */
     bool publish_estimated_georef_on_convergence = true;
+
+    /** If true, once the geo-reference has converged it keeps following the
+     *  estimate of T_enu_to_map, and is re-published, even if its own sigmas grow
+     *  above the convergence thresholds. They do when no odometry source anchors
+     *  {map} (e.g. wheel odometry only): {map} is then defined by poses that
+     *  left the window, while the vehicle pose in {enu}, which GNSS observes,
+     *  stays accurate. Otherwise the published geo-reference is frozen at its
+     *  last converged value, and so is anything derived from it (geo_pose). */
+    bool georef_track_after_convergence = false;
+
+    /** If true, the geo-reference convergence test uses the uncertainty of the
+     *  vehicle pose in {enu} (the composition of T_enu_to_map and the vehicle
+     *  pose in {map}, from their joint marginal), which is what GNSS observes,
+     *  instead of the separate marginals of both. Those are large and meaningless
+     *  when no odometry source anchors {map} (e.g. wheel odometry only), while
+     *  their composition is accurate. */
+    bool georef_convergence_in_enu = false;
 
     /** Huber robust cost threshold for GNSS factors [sigmas].
      *  Applied in whitened (normalized) residual space, so units are
@@ -743,6 +800,20 @@ class Parameters
      *  fixed wrong position look alike. */
     double gnss_gate_reacquire_min_path = 5.0;  // [m]
 
+    /** Reacquisition by the continuity of the residual: the horizontal
+     *  residual (fix minus prediction) is followed between precise fixes, those
+     *  with a horizontal sigma (after the floors) up to this [m] (e.g. RTK
+     *  fixed); degraded fixes are left out. If it grew smoothly since a fix
+     *  within the nominal gate (by at most its noise plus half the predicted
+     *  motion, from fix to fix and in total), over gnss_gate_reacquire_after
+     *  precise fixes and gnss_gate_reacquire_min_path of predicted motion, the
+     *  receiver kept tracking the vehicle while the estimate drifted away from
+     *  it: rejected precise fixes are accepted again at once, if their height
+     *  passes the gate. A jump of the residual (e.g. a wrong RTK fix) restarts
+     *  the chain, so only the run reacquisition above can let those fixes in.
+     *  0 disables this. */
+    double gnss_gate_reacquire_max_sigma = 0.2;  // [m]
+
     /** Before the geo-reference converges, consecutive fixes are compared with
      *  each other: they may not be farther apart than this speed allows, plus
      *  their uncertainty [m/s]. */
@@ -766,6 +837,67 @@ class Parameters
 
     /// Same floor for the vertical (Up) component [m].
     double gnss_min_sigma_floor_z = 0.30;  // [m]
+
+    /** \name GNSS receiver bias states
+     *  Most of the error of a low-cost (non-RTK) receiver is a slowly varying
+     *  offset, not white noise. With `gnss_bias_sigma_xy > 0`, each receiver
+     *  whose sensor label matches `gnss_bias_labels_re` gets a position bias
+     *  state (ENU axes, one variable per fix, `gnss_bias_key()`), added to the
+     *  predicted antenna position of its fixes (`FactorGnssMapEnuBias`), whose
+     *  sigmas then stand for the white part of the error only (see
+     *  `gnss_bias_white_sigma_xy`). The bias is a
+     *  first-order Gauss-Markov process, as the IMU attitude yaw bias:
+     *  b(k) = phi * b(k-1) + w, phi = exp(-dt/tau), var(w) = sigma^2 (1 - phi^2),
+     *  with a prior N(0, sigma^2) on the first variable. Fused fixes then never
+     *  bring the position sigma below the bias sigma, a slow wander bends the
+     *  trajectory less, and with another absolute reference (e.g. RTK fixes from
+     *  a second receiver, or a fixed geo-reference with map-based localization)
+     *  the bias becomes observable, so the receiver stays consistent with it.
+     *  With one receiver and an estimated geo-reference, a constant bias is not
+     *  observable: the convergence threshold `convergence_max_position_sigma`
+     *  must then be above `gnss_bias_sigma_xy`. The innovation gate predicts
+     *  these fixes with the bias, and, for the fixes of other receivers, never
+     *  takes the prediction as more precise than the solved vehicle position in
+     *  {enu}, so a better source (e.g. RTK) is not locked out.
+     * @{ */
+
+    /** Stationary sigma of the horizontal (East, North) bias [m], e.g. ~1-3 m
+     *  for a u-blox 7 class receiver. 0 = no bias states (default). */
+    double gnss_bias_sigma_xy = 0.0;  // [m]
+
+    /** Stationary sigma of the vertical (Up) bias [m]. 0 = horizontal bias
+     *  only (the vertical component is held at zero). */
+    double gnss_bias_sigma_z = 0.0;  // [m]
+
+    /** Correlation time of the bias [s]: how long a bias, once observed,
+     *  keeps being known (e.g. after the RTK fixes of another receiver stop). */
+    double gnss_bias_time_constant = 300.0;  // [s]
+
+    /** Sensor labels of the receivers that get a bias state (regex), e.g. only
+     *  the low-cost one when an RTK receiver is fused as well. Empty (default):
+     *  none, so enabling the feature needs both this and gnss_bias_sigma_xy. */
+    std::string gnss_bias_labels_re;
+
+    /** Horizontal sigma of the white part of the error of the receivers with a
+     *  bias state [m], replacing their reported one (0 = keep it). Receivers
+     *  usually report their total error, bias included: with a bias state,
+     *  that would count the bias twice, and a reference (e.g. RTK) could not
+     *  observe it. Low-cost receivers have ~0.1 m of fix-to-fix noise. The
+     *  floors (gnss_min_sigma_floor_xy) still apply. */
+    double gnss_bias_white_sigma_xy = 0.0;  // [m]
+
+    /// Same, for the vertical (Up) sigma [m] (0 = keep the reported one).
+    double gnss_bias_white_sigma_z = 0.0;  // [m]
+
+    /** A bias whose last estimate lies farther than this many stationary
+     *  sigmas from zero (horizontal Mahalanobis distance, plus vertical if
+     *  estimated) is not a plausible receiver error: most likely the odometry
+     *  drifted and the bias absorbed it (a drift of d m/s leaves the bias about
+     *  d * tau away). The chain then starts again from its prior at the next
+     *  fix, so the fixes correct the trajectory instead. 0 = never. */
+    double gnss_bias_restart_sigmas = 3.0;
+
+    /** @} */
 
     /** If not empty, the final geo-reference (geodetic datum + T_enu_to_map,
      *  fixed or estimated) is written to this YAML file when the estimator is

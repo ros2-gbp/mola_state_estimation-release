@@ -2,6 +2,9 @@
 Changelog for package mola_georeferencing
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+3.4.0 (2026-11-20)
+------------------
+
 3.3.0 (2026-11-15)
 ------------------
 * Exact GTSAM->MRPT SE(3) pose covariance conversions.

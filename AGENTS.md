@@ -82,7 +82,7 @@ Sliding-window factor-graph smoother on GTSAM's iSAM2
 | ROS 2 launches | `ros2-launchs/ros2-state-estimator.launch.py`, `ros2-fuse-two-odometries.launch.py`, `ros2-demo-simulated-sensors.launch.py` (+ `rviz2/state_estimation_demo.rviz`) |
 | MOLA-CLI launches | `mola-cli-launchs/state_estimator_ros2.yaml`, `demo_lidar_odom_plus_wheel_odom_fusion.yaml` |
 | CLI app | `apps/mola-navstate-cli.cpp` |
-| Unit tests (48) | `tests/test-*.cpp` |
+| Unit tests (52) | `tests/test-*.cpp` |
 | Integration tests | `test/integration/test_*.py` (real time; run serially) |
 
 Structure:
@@ -93,8 +93,14 @@ Structure:
   assume it is held.
 - Per keyframe: pose `T(k)`, body linear velocity `V(k)`, body angular velocity
   `W(k)`. Per odometry frame `i`: `T_map_to_odom_i`. Plus `T_enu_to_map`.
-  With `imu_preintegration.enabled`, also IMU biases `Z(k)`
-  (`imuBias::ConstantBias`), chained by a random walk on every link.
+  With `imu_preintegration.enabled`, once an IMU has been seen, also IMU biases
+  `Z(k)` (`imuBias::ConstantBias`), chained by a random walk on every link
+  between keyframes having them (prior if the closest one has none; link sigma
+  floored at 1/1000 of `initial_*_bias_sigma`, so fast keyframes stay
+  factorable: `MAX_BIAS_PRIOR_TO_LINK_SIGMA_RATIO`); with
+  `gyro_only` and `max_imus` > 1, one chain per extra IMU (`Y(k)`, `X(k)`,
+  `bias_key()`), also only once that IMU has been seen
+  (`test-imu-bias-chains-unseen-imu`).
 - Keyframes are created per timestamp, reusing an existing one closer than
   `min_time_difference_to_create_new_frame` (the first neighbor found; GNSS asks
   for the closest one); consecutive keyframes are linked
@@ -141,6 +147,14 @@ Sensor inputs:
   fixed in `{map}` at the leveled tilt instead. The constant-velocity linear
   factors stay, weaker (`linear_kinematics_sigma_scale`) once an IMU has been seen,
   so without any IMU the estimates are those with preintegration off.
+  `gyro_only` (vibrating vehicles, whose accelerometer is useless to integrate):
+  rotation-only `FactorGyroPreintegration` links instead (gtsam AHRS
+  preintegration; GTSAM 4.2 corrects the bias in the body frame, so readings are
+  rotated to the body frame before integrating), no gravity, no leveling of
+  `T_enu_to_map`, linear kinematic factors at full strength, and `_lin`'s automatic
+  value is 2 cm. `max_imus` (1-3, gyro_only only): more IMUs matching
+  `sensor_label_re`, each with its own bias chain (`ExtraGyro`,
+  `attach_extra_gyro_factors_locked()`), so rotation stays observed if one stops.
   Accelerometer units: `accel_scale` (0 = automatic: units of g if the mean norm of
   the first 0.5 s of readings is below 3, kept across resets like `recentAccel_`);
   links wait in `imuLinksAwaiting` until it is known.
@@ -163,12 +177,23 @@ Sensor inputs:
   a short gap in it rejects; else `gnss_max_plausible_speed`); predictions only from solved keyframes; once converged (or relocalized), a chi2 innovation gate
   against the predicted antenna, whose sigma grows with the path since the last
   accepted fix; a run of `gnss_gate_reacquire_after` rejected fixes that move like
-  the prediction over `gnss_gate_reacquire_min_path` is reacquired. Counters in
+  the prediction over `gnss_gate_reacquire_min_path` is reacquired. The horizontal
+  residual is followed between precise fixes (sigma up to `gnss_gate_reacquire_max_sigma`,
+  RTK fixed): a rejected one (height within the gate) is reacquired at once when it grew
+  smoothly (noise + half the predicted path, per fix and in total) since one within the
+  nominal gate, over `gnss_gate_reacquire_after` fixes and `gnss_gate_reacquire_min_path`;
+  a jump restarts it and the rejected run; one chain per antenna; `reacquired_by_continuity` counts it. Counters in
   `gnss_gate_stats()` (kept across resets), throttled warnings. The fix goes
   to the closest keyframe within
   `gnss_nearby_keyframe_stamp_tolerance`; a nonzero time offset uses
   `FactorGnssMapEnuConstVel`, which moves the antenna to the fix time with that
   keyframe's `V`/`W`.
+- GNSS receiver bias states (off unless `gnss_bias_sigma_xy` > 0 and a receiver matches
+  `gnss_bias_labels_re`): a Gauss-Markov chain of ENU biases per receiver
+  (`gnss_bias_variable_locked()`, `gnss_bias_key()`, `GaussMarkovPoint3`) observed through
+  `FactorGnssMapEnuBias` / `...ConstVelBias`; gate in `predicted_gnss_bias_locked()` and
+  `solvedEnuPosVar`. Settings, gate and theory: docs, "GNSS receiver bias states".
+  `test-gnss-bias-state`.
 - `fuse_twist()`: velocity priors.
 - IMU biases (`imu_bias_tracking`, default off): one `mola::imu::ImuBiasTracker` for all
   IMUs matching `imu_bias_labels_re` (raw readings from `onNewObservation()`, even if not
@@ -187,14 +212,16 @@ Relative formulation (wheel odometry and every non-`{map}` `fuse_pose()` source)
 - A factor whose previous keyframe was already marginalized is skipped.
 - For `fuse_pose()` sources, the increment covariance is diagonal, from
   `relative_pose_increment_sigma_lin`/`_ang` (defaults tuned for LiDAR odometry:
-  `_ang` 1e-5 rad; `_lin` 0 = automatic, resolved by `loadFrom()` to 0.1 mm with
-  preintegration on and available, 2 cm otherwise); the supplied covariance is
+  `_ang` 1e-5 rad; `_lin` 0 = automatic, chosen per increment
+  (`relative_pose_increment_sigma_lin_in_use()`): 0.1 mm once an IMU is being
+  preintegrated (not `gyro_only`), 2 cm otherwise); the supplied covariance is
   only used by the anchor factor. `relative_pose_increment_sigma_per_sqrt_meter`/`_per_sqrt_rad` add
   a variance growing linearly with the increment size (random walk).
 
 Other behavior:
 - `pose_robust_huber_threshold` (0 = off): Huber kernel on every per-reading
-  `fuse_pose()` factor, not on the one-time anchor.
+  `fuse_pose()` factor, not on the one-time anchor. `odometry_robust_huber_threshold`
+  (0 = off): the same on the wheel odometry increments (`fuse_odometry()`).
 - `pose_max_lead_time` (0.5 s, 0 = off): a `fuse_pose()` reading stamped more than
   this after both its source's previous reading and the newest reading of the other
   inputs that delivered readings since then is dropped (`accept_pose_stamp()`, in
@@ -240,7 +267,7 @@ Other behavior:
   centripetal included. An accurate odometry-frame pose source must come out
   unchanged (`test-odometry-pose-source-fidelity`).
 - iSAM2 relinearization: per variable type, `isam2_relinearize_threshold`
-  (0.01) for poses `T`/`F`, a fixed 0.1 for `V`/`W`/`Z`/`B`
+  (0.01) for poses `T`/`F`, a fixed 0.1 for `V`/`W`/`Z`/`B` and the GNSS biases
   (`test-imu-gyro-solver-stability`).
 - iSAM2 ordering (`isam2_newest_keys_last`, default on, GTSAM 4.2 only):
   `NewestLastFixedLagSmoother` re-implements 4.2's fixed-lag `update()` so the
@@ -261,6 +288,7 @@ Other behavior:
 - `estimated_navstate()` returns empty, instead of throwing, while the graph
   cannot be solved yet. Any exception in the solve (`solve_locked()`: update,
   estimate or marginals) is logged and resets the smoother; it never reaches callers.
+  `solve_failures()` counts them (tests that must stay well-conditioned assert 0).
 - Two resets: `reset()` (also after a failed solve) starts from scratch: the next
   poses define {map} again, as after a re-localization. `reset_motion()` keeps
   {map}: odometry frames come back anchored at their live T_map_to_odom_i, whichever
@@ -285,17 +313,30 @@ Other behavior:
   geo-reference, GNSS/IMU attitude); the azimuth of `T_enu_to_map` until IMU
   attitude or a GNSS baseline long enough for
   `convergence_max_orientation_sigma_deg`. Estimated geo-references do not
-  converge while pinned. Until something relates `{map}` to the vehicle,
-  solving is deferred (up to one window). When `{map}` is observed only in
-  position (GNSS with a fixed geo-reference, no attitude), the orientation of
-  that odometry frame stays pinned: roll/pitch until IMU gravity or attitude,
-  yaw until IMU attitude or a GNSS baseline good for ~5 deg; both by a `{map}`
-  pose. `has_converged_localization()` then reports the pinned angles as
-  unknown (yaw sigma pi, roll/pitch pi/2), so a robot without IMU converges on
-  position only if `convergence_max_orientation_sigma_deg` allows it. Feature
+  converge while pinned. `georef_convergence_in_enu`: test the vehicle pose sigmas in
+  `{enu}` (`vehicle_enu_sigmas_locked()`, joint marginal of `T_enu_to_map` and `T(k)`)
+  instead of both marginals, which grow without bound when no odometry frame anchors
+  `{map}` (wheel odometry only). `georef_track_after_convergence`: once converged, keep
+  updating and publishing the geo-reference even if those marginals grow. Until something places the vehicle in `{map}`
+  (a `{map}` anchor or pose, the first-pose pin, `odomFrameAnchor`, or GNSS through a
+  fixed geo-reference), solving is deferred (up to one window). When `{map}` is observed only in
+  part, `odomFrameAnchor` keeps pinning the rest of that odometry frame: with
+  GNSS through a fixed geo-reference and no attitude, its orientation (roll/pitch
+  until IMU gravity or attitude, yaw until IMU attitude or a GNSS baseline good
+  for ~5 deg); with IMU attitude through a fixed geo-reference, its position
+  (until GNSS); all by a `{map}` pose. `has_converged_localization()`, the async snapshot and the
+  GNSS gate report what was pinned in the last solve as unknown (position sigma
+  1 km, yaw pi, roll/pitch pi/2; `inflate_pinned_cov_locked()`), so a robot without
+  IMU converges on position only if `convergence_max_orientation_sigma_deg` allows it,
+  and odometry plus IMU attitude never converges without a position source. Feature
   macro `MOLA_STATE_ESTIMATION_SMOOTHER_HAS_ORIENTATION_GAUGE` (`Parameters.h`).
 - A new `T_map_to_odom_i` is seeded from its first reading. A new key is never
   marginalized in the update that inserts it.
+- `link_first_pose_to_reference_origin_sigma` pins the first keyframe; if it has no
+  pose or odometry reading (e.g. IMU ahead of the first pose), the pin moves once to
+  the first keyframe that has one, while it is not marginalized
+  (`pin_first_pose_locked()`, `firstPoseAnchor`). GNSS+IMU-only setups keep it on
+  the first keyframe (`test-gnss-imu-only-first-pose-pin`).
 - Observations labeled `ground_truth` are ignored by both estimators unless
   `fuse_ground_truth_label: true`.
 - Optional planar motion (`enforce_planar_motion`).
@@ -323,7 +364,8 @@ Georeferencing and relocalization:
 - `has_converged_localization()`: with `estimate_geo_reference=true`, true once
   the geo-reference is known; otherwise, when `{map}` is observed in the last
   solve (not just pinned by its gauge anchor, which makes the pose look certain
-  at the odometry origin) and the vehicle's own pose sigmas pass the same thresholds.
+  at the odometry origin; directions still pinned count as unknown) and the
+  vehicle's own pose sigmas pass the same thresholds.
   Steady-state position sigma is bounded by the raw GNSS noise, so the
   thresholds must match the receiver.
 - `fuse_imu()` applies a fixed +90 deg yaw so North-referenced IMU yaw becomes
@@ -374,10 +416,14 @@ Headers in `include/mola_gtsam_factors/`, sources in `src/`.
 | `FactorGnssEnu` | `ExpressionFactorN` | GNSS position in ENU |
 | `FactorGnssMapEnu` | `ExpressionFactorN` | GNSS with explicit `T_enu_to_map` |
 | `FactorGnssMapEnuConstVel` | `ExpressionFactorN` | Same, fix time offset from its keyframe (uses `V`, `W`) |
+| `FactorGnssMapEnuBias` | `ExpressionFactorN` | `FactorGnssMapEnu` plus a receiver position bias variable (Point3, ENU) |
+| `FactorGnssMapEnuConstVelBias` | `ExpressionFactorN` | `FactorGnssMapEnuConstVel` plus that bias |
+| `GaussMarkovPoint3` | (helper) | Prior noise and link factors of a first-order Gauss-Markov Point3 chain (axes with sigma 0 held at zero) |
 | `MeasuredGravityFactor` | `ExpressionFactorN` | Up-vector leveling relative to `T_enu_to_map` |
 | `MapGravityFactor` | `ExpressionFactorN` | Up-vector leveling in a z-up map frame (no geo-reference) |
 | `Pose3RotationFactor` | `ExpressionFactorN` | Rotation-only constraint |
 | `Pose3RotationYawBiasFactor` | `ExpressionFactorN` | Rotation-only, with a scalar azimuth bias variable |
+| `FactorGyroPreintegration` | `NoiseModelFactorN<Pose3, Pose3, ConstantBias>` | Rotation-only gyro preintegration (wraps `AHRSFactor`; sensor-frame bias) |
 
 `imu_helpers.h`: accelerometer/quaternion sanity checks and the ENU azimuth
 correction shared by the estimators and georeferencing.
@@ -386,6 +432,9 @@ correction shared by the estimators and georeferencing.
 stamps into a `PreintegratedImuMeasurements`: readings linearly interpolated at
 each sub-interval midpoint, and the tangential lever-arm acceleration
 (dw/dt x r), which gtsam's `body_P_sensor` correction leaves out, removed.
+`integrate_gyro_readings()`: the same for the gyroscope only, into a
+`PreintegratedAhrsMeasurements`, readings rotated to the body frame
+(`FactorGyroPreintegration`, `test_gyro_preintegration_factor`).
 
 ## 4. `mola_georeferencing`
 
@@ -441,9 +490,12 @@ workspace overlay.
 ## ROS 2 integration
 
 Runs inside `mola_launcher`, with sensors bridged from ROS 2.
-`ros2-state-estimator.launch.py` takes `imu_topic_name`, `gnss_topic_name` and
-`odom{1,2,3}_topic` (+ `_label`), all empty (disabled) by default; its
-`navstate_*` args are empty by default, meaning "use the params YAML value".
+`ros2-state-estimator.launch.py` takes `imu_topic_name`, `imu2_topic_name`, `gnss_topic_name`
+and `odom{1,2,3}_topic` (+ `_label`, + `_as_robot_pose`: `False` for planar wheel odometry
+with the wheel motion model, needs a `mola_bridge_ros2` with per-entry
+`odometry_as_robot_pose_observation`), topics empty (disabled) by default; its `navstate_*`
+and `imu_preintegration_{gyro_only,max_imus}` args are empty by default, meaning "use the
+params YAML value" (two IMUs need both). `use_sim_time:=True` for bag replay.
 `ros2-fuse-two-odometries.launch.py` uses the same topic argument names. The fused
 `map -> base_link` pose is advertised; the bridge publishes it to `/tf`.
 
